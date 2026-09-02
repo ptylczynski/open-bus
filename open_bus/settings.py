@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'drf_spectacular',
     'gtfs.apps.GtfsConfig',
 ]
 
@@ -123,6 +124,19 @@ ROUTE_MIN_EXCHANGE_TIME_SECONDS = int(
 ROUTE_MAX_EXCHANGE_TIME_SECONDS = int(
     os.environ.get('ROUTE_MAX_EXCHANGE_TIME_SECONDS', '3600')
 )
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Open Bus API',
+    'DESCRIPTION': (
+        'API for listing imported public transport stops and finding routes '
+        'between them.'
+    ),
+    'VERSION': '1.0.0',
+}
 
 LOGGING = {
     'version': 1,
