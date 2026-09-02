@@ -15,6 +15,9 @@ The project currently provides:
 
 ## HTTP API
 
+The OpenAPI schema is available at `/api/schema/`. Interactive Swagger UI is
+available at `/api/docs/`.
+
 List every imported stop with:
 
 ```text
@@ -24,6 +27,15 @@ GET /api/stops/
 The response is a JSON array ordered by stop name and stop code. Each item
 contains `stop_id`, `stop_code`, `stop_name`, `stop_lat`, `stop_lon`, and
 `zone_id`.
+
+Suggest stops by name prefix with:
+
+```text
+GET /api/stops/suggest/?name=swi
+```
+
+The `name` query parameter must contain at least three characters. Matching is
+case-insensitive and ignores diacritics, so `swi` also matches `Święty`.
 
 Request a route between two stops with:
 
