@@ -6,7 +6,7 @@ from itertools import chain
 
 from django.conf import settings
 
-from gtfs.models import StopTime
+from gtfs.models import Stop, StopTime
 
 
 @dataclass(frozen=True)
@@ -153,18 +153,21 @@ class RouteSelectionService:
             )
 
         self._load_graph()
+        starting_stop_ids = self._starting_stop_ids(from_stop_id)
         frontier = [
             RouteState(
-                stop_id=from_stop_id,
-                stop_ids=(from_stop_id,),
+                stop_id=starting_stop_id,
+                stop_ids=(starting_stop_id,),
                 available_time=departure_time,
                 trip_ids=(),
                 trips_taken=0,
                 legs=(),
-            ),
+            )
+            for starting_stop_id in starting_stop_ids
         ]
         seen_states = {
-            ((from_stop_id,), departure_time, (), 0),
+            ((starting_stop_id,), departure_time, (), 0)
+            for starting_stop_id in starting_stop_ids
         }
         routes = []
 
@@ -222,6 +225,22 @@ class RouteSelectionService:
                 frontier = list(next_frontier.values())
 
         return routes
+
+    @staticmethod
+    def _starting_stop_ids(from_stop_id: str) -> tuple[str, ...]:
+        stop_name = Stop.objects.filter(
+            stop_id=from_stop_id,
+        ).values_list(
+            'stop_name',
+            flat=True,
+        ).first()
+        if stop_name is None:
+            return (from_stop_id,)
+        return tuple(
+            Stop.objects.filter(stop_name=stop_name)
+            .order_by('stop_id')
+            .values_list('stop_id', flat=True),
+        )
 
     def _select_destinations(
         self,
