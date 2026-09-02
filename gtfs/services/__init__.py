@@ -3,10 +3,12 @@ from gtfs.services.downloader import (
     GtfsDownloadService,
 )
 from gtfs.services.importer import GtfsImportService
+from gtfs.services.router import RouteSelectionService
 
 
 __all__ = (
     'GtfsDownloadBatchError',
     'GtfsDownloadService',
     'GtfsImportService',
+    'RouteSelectionService',
 )
