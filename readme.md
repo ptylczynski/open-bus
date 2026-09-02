@@ -8,12 +8,46 @@ The project currently provides:
 - Django models for agencies, calendars, routes, shapes, stops, trips, and stop
   times
 - PostgreSQL-backed persistence
+- a read-only endpoint for listing imported stops
 - a management command that downloads one or more GTFS ZIP feeds once or on a
   schedule
 - a small sample GTFS feed in `etc/sample-gtfs`
 
-The HTTP API is not implemented yet. At this stage, the only configured web
-route is Django's `/admin/` route.
+## HTTP API
+
+List every imported stop with:
+
+```text
+GET /api/stops/
+```
+
+The response is a JSON array ordered by stop name and stop code. Each item
+contains `stop_id`, `stop_code`, `stop_name`, `stop_lat`, `stop_lon`, and
+`zone_id`.
+
+Request a route between two stops with:
+
+```text
+POST /api/routes/
+Content-Type: application/json
+
+{
+  "from_stop_id": "STOP_A",
+  "to_stop_id": "STOP_B",
+  "departure_time": "08:30:00",
+  "min_exchange_time": "00:02:00",
+  "max_exchange_time": "00:30:00"
+}
+```
+
+Both stop IDs and `departure_time` are required. Exchange times are optional
+GTFS-style durations and fall back to the configured defaults. The response
+contains the ordered journey stops in a `stops` array. Connections on a single
+trip are preferred, followed by routes requiring one transfer, two transfers,
+and so on. Trips must depart at or after the requested time, and transfers must
+fall within the inclusive exchange-time range. Among journeys with the same
+number of transfers, the earliest arrival is returned. Candidate stops at each
+search level are calculated in parallel.
 
 ## Requirements
 
@@ -95,6 +129,10 @@ Downloader settings can be changed with environment variables:
 | `GTFS_DOWNLOAD_INTERVAL_SECONDS` | `3600` | Delay between continuous download batches |
 | `GTFS_DOWNLOAD_TIMEOUT_SECONDS` | `60` | HTTP request timeout |
 | `GTFS_LOG_LEVEL` | `INFO` | Console logging level for download and import progress |
+| `ROUTE_MAX_HOPS` | `3` | Maximum number of transfers considered during route selection |
+| `ROUTE_CALCULATION_WORKERS` | available CPU threads | Maximum number of threads available to route calculation |
+| `ROUTE_MIN_EXCHANGE_TIME_SECONDS` | `0` | Default minimum time allowed for a transfer |
+| `ROUTE_MAX_EXCHANGE_TIME_SECONDS` | `3600` | Default maximum time allowed for a transfer |
 
 ## Tests
 
