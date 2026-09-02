@@ -1,4 +1,5 @@
 import unicodedata
+from collections.abc import Iterable
 
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
@@ -120,10 +121,19 @@ class RouteCreateView(APIView):
 
 
 class StopListView(generics.ListAPIView):
-    """List all imported stops ordered by name and stop code."""
+    """List one representative of each imported stop name."""
 
-    queryset = Stop.objects.all()
+    queryset = Stop.objects.order_by('stop_name', 'stop_code', 'stop_id')
     serializer_class = StopSerializer
+
+    def list(
+        self,
+        request: Request,
+        *args: object,
+        **kwargs: object,
+    ) -> Response:
+        stops = deduplicate_stops_by_name(self.get_queryset())
+        return Response(self.get_serializer(stops, many=True).data)
 
 
 class StopSuggestionView(APIView):
@@ -149,12 +159,24 @@ class StopSuggestionView(APIView):
         )
         query_serializer.is_valid(raise_exception=True)
         prefix = normalize_stop_name(query_serializer.validated_data['name'])
-        stops = [
+        matching_stops = [
             stop
             for stop in Stop.objects.all()
             if normalize_stop_name(stop.stop_name).startswith(prefix)
         ]
+        stops = deduplicate_stops_by_name(matching_stops)
         return Response(StopSerializer(stops, many=True).data)
+
+
+def deduplicate_stops_by_name(stops: Iterable[Stop]) -> list[Stop]:
+    unique_stops = []
+    seen_stop_names = set()
+    for stop in stops:
+        if stop.stop_name in seen_stop_names:
+            continue
+        unique_stops.append(stop)
+        seen_stop_names.add(stop.stop_name)
+    return unique_stops
 
 
 def normalize_stop_name(value: str) -> str:
