@@ -174,6 +174,15 @@ administrator first if you want to sign in:
 python manage.py createsuperuser
 ```
 
+Browser clients may call `/api/` from any origin by default. To restrict CORS
+access, disable the allow-all setting and provide a comma-separated origin
+list, including each origin's scheme and port:
+
+```bash
+export CORS_ALLOW_ALL_ORIGINS=false
+export CORS_ALLOWED_ORIGINS="https://app.example.com,http://localhost:5173"
+```
+
 ## Downloading GTFS feeds
 
 Set `GTFS_URLS` to a comma-separated list of feed URLs. Download every feed
@@ -200,7 +209,7 @@ in the same batch from being attempted. After every feed in a batch downloads
 and imports successfully, ZIP archives that do not belong to the current feed
 URLs are removed from the download directory.
 
-Downloader settings can be changed with environment variables:
+Application settings can be changed with environment variables:
 
 | Variable | Default | Description |
 | --- | --- | --- |
@@ -209,6 +218,8 @@ Downloader settings can be changed with environment variables:
 | `GTFS_DOWNLOAD_INTERVAL_SECONDS` | `3600` | Delay between continuous download batches |
 | `GTFS_DOWNLOAD_TIMEOUT_SECONDS` | `60` | HTTP request timeout |
 | `GTFS_LOG_LEVEL` | `INFO` | Console logging level for download and import progress |
+| `CORS_ALLOW_ALL_ORIGINS` | `true` | Allow every origin to access `/api/` |
+| `CORS_ALLOWED_ORIGINS` | empty | Comma-separated allowed origins when allow-all is disabled |
 | `ROUTE_MAX_HOPS` | `3` | Maximum number of transfers considered during route selection |
 | `ROUTE_MAX_ALTERNATIVES_PER_HOP` | `3` | Maximum number of route alternatives returned for each transfer count |
 | `ROUTE_CALCULATION_WORKERS` | available CPU threads | Maximum number of threads available to route calculation |
