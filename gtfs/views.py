@@ -1,4 +1,3 @@
-from drf_spectacular.utils import extend_schema
 import unicodedata
 
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -26,7 +25,7 @@ class RouteCreateView(APIView):
             404: ErrorResponseSerializer,
         },
         description=(
-            'Find the earliest route between two stops after the requested '
+            'Find route alternatives between two stops after the requested '
             'departure time.'
         ),
     )
@@ -36,7 +35,7 @@ class RouteCreateView(APIView):
         from_stop = request_serializer.validated_data['from_stop']
         to_stop = request_serializer.validated_data['to_stop']
         route_service = RouteSelectionService()
-        stop_ids = route_service.find_route(
+        routes = route_service.find_routes(
             from_stop.stop_id,
             to_stop.stop_id,
             departure_time=request_serializer.validated_data['departure_time'],
@@ -47,7 +46,7 @@ class RouteCreateView(APIView):
                 request_serializer.validated_data['max_exchange_time']
             ),
         )
-        if stop_ids is None:
+        if not routes:
             return Response(
                 {
                     'detail': (
@@ -58,10 +57,66 @@ class RouteCreateView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        stops_by_id = Stop.objects.in_bulk(stop_ids)
-        stops = [stops_by_id[stop_id] for stop_id in stop_ids]
+        stops_by_id = Stop.objects.in_bulk(
+            {
+                stop_id
+                for route in routes
+                for stop_id in route.stop_ids
+            },
+        )
+        response_routes = [
+            {
+                'hops': route.hops,
+                'transfers': [
+                    {
+                        'stop': stops_by_id[next_leg.from_stop_id],
+                        'arrival_time': previous_leg.arrival_time,
+                        'departure_time': next_leg.departure_time,
+                        'wait_time': (
+                            next_leg.departure_time
+                            - previous_leg.arrival_time
+                        ),
+                        'from_route_id': previous_leg.route_id,
+                        'from_line_number': previous_leg.line_number,
+                        'to_route_id': next_leg.route_id,
+                        'to_line_number': next_leg.line_number,
+                    }
+                    for previous_leg, next_leg in zip(
+                        route.legs,
+                        route.legs[1:],
+                    )
+                ],
+                'legs': [
+                    {
+                        'trip_id': leg.trip_id,
+                        'route_id': leg.route_id,
+                        'line_number': leg.line_number,
+                        'line_name': leg.line_name,
+                        'direction': leg.direction,
+                        'direction_id': leg.direction_id,
+                        'from_stop': stops_by_id[leg.from_stop_id],
+                        'to_stop': stops_by_id[leg.to_stop_id],
+                        'departure_time': leg.departure_time,
+                        'arrival_time': leg.arrival_time,
+                        'stops': [
+                            stops_by_id[stop_id]
+                            for stop_id in leg.stop_ids
+                        ],
+                    }
+                    for leg in route.legs
+                ],
+                'stops': [
+                    stops_by_id[stop_id]
+                    for stop_id in route.stop_ids
+                ],
+            }
+            for route in routes
+        ]
 
-        return Response({'stops': StopSerializer(stops, many=True).data})
+        response_serializer = RouteResponseSerializer(
+            {'routes': response_routes},
+        )
+        return Response(response_serializer.data)
 
 
 class StopListView(generics.ListAPIView):
