@@ -436,6 +436,59 @@ class GtfsImportDatabaseTests(TestCase):
 
 
 class StopListViewTests(TestCase):
+    def test_allows_cross_origin_api_requests_by_default(self) -> None:
+        response = self.client.get(
+            reverse('stop-list'),
+            headers={'origin': 'https://frontend.example.com'},
+        )
+
+        self.assertEqual(response['Access-Control-Allow-Origin'], '*')
+
+    def test_handles_cross_origin_preflight_requests(self) -> None:
+        response = self.client.options(
+            reverse('route-create'),
+            headers={
+                'origin': 'https://frontend.example.com',
+                'access-control-request-method': 'POST',
+                'access-control-request-headers': 'content-type',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response['Access-Control-Allow-Origin'], '*')
+        self.assertIn('POST', response['Access-Control-Allow-Methods'])
+        self.assertIn(
+            'content-type',
+            response['Access-Control-Allow-Headers'],
+        )
+
+    @override_settings(
+        CORS_ALLOW_ALL_ORIGINS=False,
+        CORS_ALLOWED_ORIGINS=['https://frontend.example.com'],
+    )
+    def test_allows_a_configured_origin(self) -> None:
+        response = self.client.get(
+            reverse('stop-list'),
+            headers={'origin': 'https://frontend.example.com'},
+        )
+
+        self.assertEqual(
+            response['Access-Control-Allow-Origin'],
+            'https://frontend.example.com',
+        )
+
+    @override_settings(
+        CORS_ALLOW_ALL_ORIGINS=False,
+        CORS_ALLOWED_ORIGINS=['https://frontend.example.com'],
+    )
+    def test_rejects_an_origin_that_is_not_configured(self) -> None:
+        response = self.client.get(
+            reverse('stop-list'),
+            headers={'origin': 'https://untrusted.example.com'},
+        )
+
+        self.assertNotIn('Access-Control-Allow-Origin', response)
+
     def test_lists_all_stops_in_model_order(self) -> None:
         Stop.objects.create(
             stop_id='second',
@@ -477,6 +530,30 @@ class StopListViewTests(TestCase):
                     'zone_id': 'B',
                 },
             ],
+        )
+
+    def test_lists_one_stop_for_each_name(self) -> None:
+        Stop.objects.create(
+            stop_id='poznan-platform-2',
+            stop_code='02',
+            stop_name='Poznań Główny',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+        )
+        Stop.objects.create(
+            stop_id='poznan-platform-1',
+            stop_code='01',
+            stop_name='Poznań Główny',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+        )
+
+        response = self.client.get(reverse('stop-list'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [stop['stop_id'] for stop in response.json()],
+            ['poznan-platform-1'],
         )
 
     def test_returns_empty_list_when_no_stops_exist(self) -> None:
@@ -527,6 +604,26 @@ class StopSuggestionViewTests(TestCase):
         self.assertEqual(
             [stop['stop_id'] for stop in response.json()],
             ['lukasz'],
+        )
+
+    def test_deduplicates_stop_suggestions_by_name(self) -> None:
+        Stop.objects.create(
+            stop_id='swiety-platform-2',
+            stop_code='zzzz',
+            stop_name='Święty Marcin',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+        )
+
+        response = self.client.get(
+            reverse('stop-suggest'),
+            {'name': 'SWI'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [stop['stop_id'] for stop in response.json()],
+            ['swietokrzyska', 'swiety'],
         )
 
     def test_requires_at_least_three_characters(self) -> None:
@@ -841,6 +938,57 @@ class RouteSelectionServiceTests(TestCase):
         )
 
         self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
+
+    def test_starts_from_every_stop_with_the_selected_stop_name(self) -> None:
+        Stop.objects.create(
+            stop_id='a-platform-2',
+            stop_name='Stop A',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+        )
+        self._create_trip(
+            'direct',
+            ('a-platform-2', 'c', 'b'),
+            timedelta(hours=8),
+        )
+
+        stop_ids = RouteSelectionService(max_hops=0).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(stop_ids, ['a-platform-2', 'c', 'b'])
+
+    def test_shares_per_hop_alternative_limit_between_starting_stops(
+        self,
+    ) -> None:
+        Stop.objects.create(
+            stop_id='a-platform-2',
+            stop_name='Stop A',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+        )
+        self._create_trip('first', ('a', 'c', 'b'), timedelta(hours=8))
+        self._create_trip(
+            'second',
+            ('a-platform-2', 'd', 'b'),
+            timedelta(hours=9),
+        )
+
+        routes = RouteSelectionService(
+            max_hops=0,
+            max_alternatives_per_hop=1,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(
+            [route.stop_ids for route in routes],
+            [('a', 'c', 'b')],
+        )
 
     def test_returns_line_direction_and_timing_for_each_leg(self) -> None:
         self._create_trip(
