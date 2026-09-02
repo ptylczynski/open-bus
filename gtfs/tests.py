@@ -1,11 +1,14 @@
 import io
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Self
 from unittest.mock import Mock, call, patch
 
+from django.urls import reverse
 from django.test import SimpleTestCase, TestCase, override_settings
 
 from gtfs.models import (
@@ -24,6 +27,7 @@ from gtfs.services import (
     GtfsDownloadBatchError,
     GtfsDownloadService,
     GtfsImportService,
+    RouteSelectionService,
 )
 
 
@@ -427,3 +431,397 @@ class GtfsImportDatabaseTests(TestCase):
 
         self.assertTrue(Agency.objects.filter(agency_id='old').exists())
         self.assertFalse(Agency.objects.filter(agency_id='1').exists())
+
+
+class StopListViewTests(TestCase):
+    def test_lists_all_stops_in_model_order(self) -> None:
+        Stop.objects.create(
+            stop_id='second',
+            stop_code='02',
+            stop_name='Second Stop',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+            zone_id='B',
+        )
+        Stop.objects.create(
+            stop_id='first',
+            stop_code='01',
+            stop_name='First Stop',
+            stop_lat='51.100000000000',
+            stop_lon='17.000000000000',
+            zone_id='A',
+        )
+
+        response = self.client.get(reverse('stop-list'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            [
+                {
+                    'stop_id': 'first',
+                    'stop_code': '01',
+                    'stop_name': 'First Stop',
+                    'stop_lat': '51.100000000000',
+                    'stop_lon': '17.000000000000',
+                    'zone_id': 'A',
+                },
+                {
+                    'stop_id': 'second',
+                    'stop_code': '02',
+                    'stop_name': 'Second Stop',
+                    'stop_lat': '52.400000000000',
+                    'stop_lon': '16.900000000000',
+                    'zone_id': 'B',
+                },
+            ],
+        )
+
+    def test_returns_empty_list_when_no_stops_exist(self) -> None:
+        response = self.client.get(reverse('stop-list'))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), [])
+
+
+class RouteCreateViewTests(TestCase):
+    @classmethod
+    def setUpTestData(cls) -> None:
+        for index in range(12):
+            Stop.objects.create(
+                stop_id=f'stop-{index}',
+                stop_code=f'{index:02}',
+                stop_name=f'Stop {index}',
+                stop_lat='52.400000000000',
+                stop_lon='16.900000000000',
+            )
+
+    @patch(
+        'gtfs.views.RouteSelectionService.find_route',
+        return_value=['stop-0', 'stop-5', 'stop-1'],
+    )
+    def test_returns_ordered_stops_selected_for_route(
+        self,
+        find_route: Mock,
+    ) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'stop-0',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+                'min_exchange_time': '00:02:00',
+                'max_exchange_time': '00:20:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        stops = response.json()['stops']
+        self.assertEqual(
+            [stop['stop_id'] for stop in stops],
+            ['stop-0', 'stop-5', 'stop-1'],
+        )
+        find_route.assert_called_once_with(
+            'stop-0',
+            'stop-1',
+            departure_time=timedelta(hours=8),
+            min_exchange_time=timedelta(minutes=2),
+            max_exchange_time=timedelta(minutes=20),
+        )
+
+    @override_settings(
+        ROUTE_MIN_EXCHANGE_TIME_SECONDS=180,
+        ROUTE_MAX_EXCHANGE_TIME_SECONDS=900,
+    )
+    @patch('gtfs.views.RouteSelectionService.find_route', return_value=None)
+    def test_uses_default_exchange_times_when_request_omits_them(
+        self,
+        find_route: Mock,
+    ) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'stop-0',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn('No route found', response.json()['detail'])
+        find_route.assert_called_once_with(
+            'stop-0',
+            'stop-1',
+            departure_time=timedelta(hours=8),
+            min_exchange_time=timedelta(minutes=3),
+            max_exchange_time=timedelta(minutes=15),
+        )
+
+    def test_rejects_unknown_from_stop_id(self) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'unknown',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('from_stop_id', response.json())
+
+    def test_rejects_unknown_to_stop_id(self) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'stop-0',
+                'to_stop_id': 'unknown',
+                'departure_time': '08:00:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('to_stop_id', response.json())
+
+    def test_requires_departure_time(self) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {'from_stop_id': 'stop-0', 'to_stop_id': 'stop-1'},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('departure_time', response.json())
+
+    def test_rejects_exchange_range_with_maximum_below_minimum(self) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'stop-0',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+                'min_exchange_time': '00:20:00',
+                'max_exchange_time': '00:10:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('max_exchange_time', response.json())
+
+
+class RouteSelectionServiceTests(TestCase):
+    def setUp(self) -> None:
+        agency = Agency.objects.create(
+            agency_id='agency',
+            agency_name='Transit',
+            agency_url='https://example.com',
+            agency_timezone='UTC',
+        )
+        calendar = Calendar.objects.create(
+            service_id='service',
+            monday=True,
+            tuesday=True,
+            wednesday=True,
+            thursday=True,
+            friday=True,
+            saturday=True,
+            sunday=True,
+            start_date='2026-01-01',
+            end_date='2026-12-31',
+        )
+        self.route = Route.objects.create(
+            route_id='route',
+            agency=agency,
+            route_short_name='1',
+            route_type=3,
+        )
+        self.calendar = calendar
+        for stop_id in ('a', 'b', 'c', 'd', 'e'):
+            Stop.objects.create(
+                stop_id=stop_id,
+                stop_name=f'Stop {stop_id.upper()}',
+                stop_lat='52.400000000000',
+                stop_lon='16.900000000000',
+            )
+
+    def _create_trip(
+        self,
+        trip_id: str,
+        stop_ids: tuple[str, ...],
+        start_time: timedelta,
+    ) -> None:
+        trip = Trip.objects.create(
+            trip_id=trip_id,
+            route=self.route,
+            service=self.calendar,
+        )
+        StopTime.objects.bulk_create(
+            [
+                StopTime(
+                    trip=trip,
+                    stop_id=stop_id,
+                    stop_sequence=index,
+                    arrival_time=start_time + timedelta(minutes=index * 10),
+                    departure_time=start_time + timedelta(minutes=index * 10),
+                )
+                for index, stop_id in enumerate(stop_ids)
+            ],
+        )
+
+    def test_finds_direct_connection_with_intermediate_stops(self) -> None:
+        self._create_trip(
+            'direct',
+            ('a', 'c', 'd', 'b'),
+            timedelta(hours=8),
+        )
+
+        stop_ids = RouteSelectionService(max_hops=0).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
+
+    @override_settings(ROUTE_CALCULATION_WORKERS=2)
+    def test_finds_connection_with_one_transfer_in_parallel(self) -> None:
+        self._create_trip('first', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'second',
+            ('c', 'd', 'b'),
+            timedelta(hours=8, minutes=15),
+        )
+
+        original_map = ThreadPoolExecutor.map
+        with patch.object(
+            ThreadPoolExecutor,
+            'map',
+            autospec=True,
+            side_effect=original_map,
+        ) as executor_map:
+            with patch(
+                'gtfs.services.router.ThreadPoolExecutor',
+                side_effect=ThreadPoolExecutor,
+            ) as executor_class:
+                stop_ids = RouteSelectionService(max_hops=1).find_route(
+                    'a',
+                    'b',
+                    departure_time=timedelta(hours=7, minutes=30),
+                )
+
+        self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
+        executor_class.assert_called_once_with(max_workers=2)
+        self.assertEqual(executor_map.call_count, 2)
+
+    def test_prefers_direct_connection_over_transfer(self) -> None:
+        self._create_trip('first', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'second',
+            ('c', 'b'),
+            timedelta(hours=8, minutes=15),
+        )
+        self._create_trip('third', ('a', 'd', 'b'), timedelta(hours=9))
+
+        stop_ids = RouteSelectionService(max_hops=1).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(stop_ids, ['a', 'd', 'b'])
+
+    def test_respects_trip_direction(self) -> None:
+        self._create_trip(
+            'reverse',
+            ('b', 'c', 'a'),
+            timedelta(hours=8),
+        )
+
+        stop_ids = RouteSelectionService(max_hops=2).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertIsNone(stop_ids)
+
+    def test_stops_search_at_configured_hop_limit(self) -> None:
+        self._create_trip('first', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'second',
+            ('c', 'd'),
+            timedelta(hours=8, minutes=15),
+        )
+        self._create_trip(
+            'third',
+            ('d', 'b'),
+            timedelta(hours=8, minutes=30),
+        )
+
+        with override_settings(ROUTE_MAX_HOPS=1):
+            too_short = RouteSelectionService().find_route(
+                'a',
+                'b',
+                departure_time=timedelta(hours=7, minutes=30),
+            )
+        with override_settings(ROUTE_MAX_HOPS=2):
+            complete = RouteSelectionService().find_route(
+                'a',
+                'b',
+                departure_time=timedelta(hours=7, minutes=30),
+            )
+
+        self.assertIsNone(too_short)
+        self.assertEqual(complete, ['a', 'c', 'd', 'b'])
+
+    def test_ignores_trips_departing_before_requested_time(self) -> None:
+        self._create_trip('early', ('a', 'c', 'b'), timedelta(hours=7))
+        self._create_trip('later', ('a', 'd', 'b'), timedelta(hours=8))
+
+        stop_ids = RouteSelectionService(max_hops=0).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(stop_ids, ['a', 'd', 'b'])
+
+    def test_applies_minimum_and_maximum_exchange_times(self) -> None:
+        self._create_trip('first', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'too-soon',
+            ('c', 'e', 'b'),
+            timedelta(hours=8, minutes=11),
+        )
+        self._create_trip(
+            'valid',
+            ('c', 'd', 'b'),
+            timedelta(hours=8, minutes=15),
+        )
+
+        stop_ids = RouteSelectionService(max_hops=1).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+            min_exchange_time=timedelta(minutes=2),
+            max_exchange_time=timedelta(minutes=10),
+        )
+
+        self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
+
+    def test_rejects_transfer_after_maximum_exchange_time(self) -> None:
+        self._create_trip('first', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'too-late',
+            ('c', 'b'),
+            timedelta(hours=8, minutes=30),
+        )
+
+        stop_ids = RouteSelectionService(max_hops=1).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+            min_exchange_time=timedelta(0),
+            max_exchange_time=timedelta(minutes=10),
+        )
+
+        self.assertIsNone(stop_ids)
