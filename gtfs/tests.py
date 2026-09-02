@@ -484,6 +484,59 @@ class StopListViewTests(TestCase):
         self.assertEqual(response.json(), [])
 
 
+class StopSuggestionViewTests(TestCase):
+    @classmethod
+    def setUpTestData(cls) -> None:
+        for stop_id, stop_name in (
+            ('swiety', 'Święty Marcin'),
+            ('swietokrzyska', 'Świętokrzyska'),
+            ('lukasz', 'Łukaszewicza'),
+            ('other', 'Długa'),
+        ):
+            Stop.objects.create(
+                stop_id=stop_id,
+                stop_code=stop_id,
+                stop_name=stop_name,
+                stop_lat='52.400000000000',
+                stop_lon='16.900000000000',
+            )
+
+    def test_suggests_stops_by_case_and_diacritic_insensitive_prefix(
+        self,
+    ) -> None:
+        response = self.client.get(
+            reverse('stop-suggest'),
+            {'name': 'SWI'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [stop['stop_id'] for stop in response.json()],
+            ['swietokrzyska', 'swiety'],
+        )
+
+    def test_ignores_polish_l_stroke(self) -> None:
+        response = self.client.get(
+            reverse('stop-suggest'),
+            {'name': 'LUK'},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [stop['stop_id'] for stop in response.json()],
+            ['lukasz'],
+        )
+
+    def test_requires_at_least_three_characters(self) -> None:
+        response = self.client.get(
+            reverse('stop-suggest'),
+            {'name': 'sw'},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('name', response.json())
+
+
 class RouteCreateViewTests(TestCase):
     @classmethod
     def setUpTestData(cls) -> None:
