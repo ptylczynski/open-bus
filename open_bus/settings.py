@@ -106,6 +106,23 @@ GTFS_TEMP_DIR = Path(
         Path(tempfile.gettempdir()) / 'open_bus_gtfs',
     )
 )
+ROUTE_MAX_HOPS = int(os.environ.get('ROUTE_MAX_HOPS', '3'))
+try:
+    available_cpu_threads = len(os.sched_getaffinity(0))
+except AttributeError:
+    available_cpu_threads = os.cpu_count() or 1
+ROUTE_CALCULATION_WORKERS = int(
+    os.environ.get(
+        'ROUTE_CALCULATION_WORKERS',
+        str(available_cpu_threads),
+    )
+)
+ROUTE_MIN_EXCHANGE_TIME_SECONDS = int(
+    os.environ.get('ROUTE_MIN_EXCHANGE_TIME_SECONDS', '0')
+)
+ROUTE_MAX_EXCHANGE_TIME_SECONDS = int(
+    os.environ.get('ROUTE_MAX_EXCHANGE_TIME_SECONDS', '3600')
+)
 
 LOGGING = {
     'version': 1,
