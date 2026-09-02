@@ -58,3 +58,15 @@ class StopSerializer(serializers.ModelSerializer):
             'stop_lon',
             'zone_id',
         )
+
+
+class RouteResponseSerializer(serializers.Serializer):
+    stops = StopSerializer(many=True)
+
+
+class ErrorResponseSerializer(serializers.Serializer):
+    detail = serializers.CharField()
+
+
+class StopSuggestionQuerySerializer(serializers.Serializer):
+    name = serializers.CharField(min_length=3, trim_whitespace=True)
