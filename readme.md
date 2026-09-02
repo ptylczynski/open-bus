@@ -45,7 +45,7 @@ Content-Type: application/json
 
 {
   "from_stop_id": "STOP_A",
-  "to_stop_id": "STOP_B",
+  "to_stop_id": "STOP_C",
   "departure_time": "08:30:00",
   "min_exchange_time": "00:02:00",
   "max_exchange_time": "00:30:00"
@@ -54,12 +54,80 @@ Content-Type: application/json
 
 Both stop IDs and `departure_time` are required. Exchange times are optional
 GTFS-style durations and fall back to the configured defaults. The response
-contains the ordered journey stops in a `stops` array. Connections on a single
-trip are preferred, followed by routes requiring one transfer, two transfers,
-and so on. Trips must depart at or after the requested time, and transfers must
-fall within the inclusive exchange-time range. Among journeys with the same
-number of transfers, the earliest arrival is returned. Candidate stops at each
-search level are calculated in parallel.
+contains a `routes` array. Each route has a `hops` transfer count and its
+ordered journey stops in a `stops` array. Its `legs` describe every vehicle
+used, including the line number and name, passenger-facing direction, boarding
+and alighting stops, and departure and arrival times. The `transfers` array
+identifies interchange stops, incoming and outgoing lines, and waiting times.
+The number of results for each transfer count is capped by
+`ROUTE_MAX_ALTERNATIVES_PER_HOP`. Results are ordered by transfer count and
+then earliest arrival. Trips must depart at or after the requested time, and
+transfers must fall within the inclusive exchange-time range. Candidate stops
+at each search level are calculated in parallel.
+
+```json
+{
+  "routes": [
+    {
+      "hops": 1,
+      "transfers": [
+        {
+          "stop": {"stop_id": "STOP_B"},
+          "arrival_time": "08:40:00",
+          "departure_time": "08:45:00",
+          "wait_time": "00:05:00",
+          "from_route_id": "route-10",
+          "from_line_number": "10",
+          "to_route_id": "route-20",
+          "to_line_number": "20"
+        }
+      ],
+      "legs": [
+        {
+          "trip_id": "trip-10-a",
+          "route_id": "route-10",
+          "line_number": "10",
+          "line_name": "City Centre",
+          "direction": "Market Square",
+          "direction_id": 0,
+          "from_stop": {"stop_id": "STOP_A"},
+          "to_stop": {"stop_id": "STOP_B"},
+          "departure_time": "08:30:00",
+          "arrival_time": "08:40:00",
+          "stops": [
+            {"stop_id": "STOP_A"},
+            {"stop_id": "STOP_B"}
+          ]
+        },
+        {
+          "trip_id": "trip-20-a",
+          "route_id": "route-20",
+          "line_number": "20",
+          "line_name": "Station Link",
+          "direction": "Central Station",
+          "direction_id": 1,
+          "from_stop": {"stop_id": "STOP_B"},
+          "to_stop": {"stop_id": "STOP_C"},
+          "departure_time": "08:45:00",
+          "arrival_time": "09:00:00",
+          "stops": [
+            {"stop_id": "STOP_B"},
+            {"stop_id": "STOP_C"}
+          ]
+        }
+      ],
+      "stops": [
+        {"stop_id": "STOP_A"},
+        {"stop_id": "STOP_B"},
+        {"stop_id": "STOP_C"}
+      ]
+    }
+  ]
+}
+```
+
+Stop objects are abbreviated in this example; actual stop objects contain all
+fields returned by `GET /api/stops/`.
 
 ## Requirements
 
@@ -142,6 +210,7 @@ Downloader settings can be changed with environment variables:
 | `GTFS_DOWNLOAD_TIMEOUT_SECONDS` | `60` | HTTP request timeout |
 | `GTFS_LOG_LEVEL` | `INFO` | Console logging level for download and import progress |
 | `ROUTE_MAX_HOPS` | `3` | Maximum number of transfers considered during route selection |
+| `ROUTE_MAX_ALTERNATIVES_PER_HOP` | `3` | Maximum number of route alternatives returned for each transfer count |
 | `ROUTE_CALCULATION_WORKERS` | available CPU threads | Maximum number of threads available to route calculation |
 | `ROUTE_MIN_EXCHANGE_TIME_SECONDS` | `0` | Default minimum time allowed for a transfer |
 | `ROUTE_MAX_EXCHANGE_TIME_SECONDS` | `3600` | Default maximum time allowed for a transfer |
