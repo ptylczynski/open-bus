@@ -108,6 +108,9 @@ GTFS_TEMP_DIR = Path(
     )
 )
 ROUTE_MAX_HOPS = int(os.environ.get('ROUTE_MAX_HOPS', '3'))
+ROUTE_MAX_ALTERNATIVES_PER_HOP = int(
+    os.environ.get('ROUTE_MAX_ALTERNATIVES_PER_HOP', '3')
+)
 try:
     available_cpu_threads = len(os.sched_getaffinity(0))
 except AttributeError:
