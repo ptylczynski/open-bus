@@ -60,8 +60,40 @@ class StopSerializer(serializers.ModelSerializer):
         )
 
 
-class RouteResponseSerializer(serializers.Serializer):
+class RouteLegSerializer(serializers.Serializer):
+    trip_id = serializers.CharField()
+    route_id = serializers.CharField()
+    line_number = serializers.CharField(allow_blank=True)
+    line_name = serializers.CharField(allow_blank=True)
+    direction = serializers.CharField(allow_blank=True)
+    direction_id = serializers.IntegerField(allow_null=True)
+    from_stop = StopSerializer()
+    to_stop = StopSerializer()
+    departure_time = serializers.DurationField()
+    arrival_time = serializers.DurationField()
     stops = StopSerializer(many=True)
+
+
+class RouteTransferSerializer(serializers.Serializer):
+    stop = StopSerializer()
+    arrival_time = serializers.DurationField()
+    departure_time = serializers.DurationField()
+    wait_time = serializers.DurationField()
+    from_route_id = serializers.CharField()
+    from_line_number = serializers.CharField(allow_blank=True)
+    to_route_id = serializers.CharField()
+    to_line_number = serializers.CharField(allow_blank=True)
+
+
+class RouteAlternativeSerializer(serializers.Serializer):
+    hops = serializers.IntegerField(min_value=0)
+    transfers = RouteTransferSerializer(many=True)
+    legs = RouteLegSerializer(many=True)
+    stops = StopSerializer(many=True)
+
+
+class RouteResponseSerializer(serializers.Serializer):
+    routes = RouteAlternativeSerializer(many=True)
 
 
 class ErrorResponseSerializer(serializers.Serializer):
