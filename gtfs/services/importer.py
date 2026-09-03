@@ -7,13 +7,14 @@ from datetime import date, datetime, timedelta
 from typing import IO, TypeVar
 
 from django.db import transaction
-from django.db.models import Model
+from django.db.models import F, Model
 
 from gtfs.models import (
     Agency,
     Calendar,
     CalendarDate,
     FeedInfo,
+    GtfsDatasetState,
     Route,
     Shape,
     Stop,
@@ -45,7 +46,19 @@ class GtfsImportService:
                 'calendar_dates': self._import_calendar_dates(archive),
                 'stop_times': self._import_stop_times(archive),
             }
+            self._advance_revision()
         return counts
+
+    @staticmethod
+    def _advance_revision() -> None:
+        state, _created = (
+            GtfsDatasetState.objects.select_for_update().get_or_create(
+                singleton_id=1,
+            )
+        )
+        GtfsDatasetState.objects.filter(pk=state.pk).update(
+            revision=F('revision') + 1,
+        )
 
     @staticmethod
     def purge() -> None:
