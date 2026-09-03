@@ -1,5 +1,5 @@
 import unicodedata
-from collections.abc import Iterable
+from datetime import timedelta
 
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import generics, status
@@ -15,7 +15,7 @@ from gtfs.serializers import (
     StopSerializer,
     StopSuggestionQuerySerializer,
 )
-from gtfs.services import RouteSelectionService
+from gtfs.services import RouteLeg, RouteOption, RouteSelectionService, WalkLeg
 
 
 class RouteCreateView(APIView):
@@ -35,7 +35,9 @@ class RouteCreateView(APIView):
         request_serializer.is_valid(raise_exception=True)
         from_stop = request_serializer.validated_data['from_stop']
         to_stop = request_serializer.validated_data['to_stop']
-        route_service = RouteSelectionService()
+        route_service = RouteSelectionService(
+            max_hops=request_serializer.validated_data.get('hops'),
+        )
         routes = route_service.find_routes(
             from_stop.stop_id,
             to_stop.stop_id,
@@ -46,6 +48,7 @@ class RouteCreateView(APIView):
             max_exchange_time=(
                 request_serializer.validated_data['max_exchange_time']
             ),
+            service_date=request_serializer.validated_data['service_date'],
         )
         if not routes:
             return Response(
@@ -65,75 +68,29 @@ class RouteCreateView(APIView):
                 for stop_id in route.stop_ids
             },
         )
+        requested_departure = request_serializer.validated_data['departure_time']
         response_routes = [
-            {
-                'hops': route.hops,
-                'transfers': [
-                    {
-                        'stop': stops_by_id[next_leg.from_stop_id],
-                        'arrival_time': previous_leg.arrival_time,
-                        'departure_time': next_leg.departure_time,
-                        'wait_time': (
-                            next_leg.departure_time
-                            - previous_leg.arrival_time
-                        ),
-                        'from_route_id': previous_leg.route_id,
-                        'from_line_number': previous_leg.line_number,
-                        'to_route_id': next_leg.route_id,
-                        'to_line_number': next_leg.line_number,
-                    }
-                    for previous_leg, next_leg in zip(
-                        route.legs,
-                        route.legs[1:],
-                    )
-                ],
-                'legs': [
-                    {
-                        'trip_id': leg.trip_id,
-                        'route_id': leg.route_id,
-                        'line_number': leg.line_number,
-                        'line_name': leg.line_name,
-                        'direction': leg.direction,
-                        'direction_id': leg.direction_id,
-                        'from_stop': stops_by_id[leg.from_stop_id],
-                        'to_stop': stops_by_id[leg.to_stop_id],
-                        'departure_time': leg.departure_time,
-                        'arrival_time': leg.arrival_time,
-                        'stops': [
-                            stops_by_id[stop_id]
-                            for stop_id in leg.stop_ids
-                        ],
-                    }
-                    for leg in route.legs
-                ],
-                'stops': [
-                    stops_by_id[stop_id]
-                    for stop_id in route.stop_ids
-                ],
-            }
+            route_response(route, stops_by_id, requested_departure)
             for route in routes
         ]
 
         response_serializer = RouteResponseSerializer(
-            {'routes': response_routes},
+            {
+                'service_date': request_serializer.validated_data['service_date'],
+                'routes': response_routes,
+            },
         )
         return Response(response_serializer.data)
 
 
 class StopListView(generics.ListAPIView):
-    """List one representative of each imported stop name."""
+    """List one representative physical stop for each stop name."""
 
-    queryset = Stop.objects.order_by('stop_name', 'stop_code', 'stop_id')
+    queryset = (
+        Stop.objects.order_by('stop_name', 'stop_code', 'stop_id')
+        .distinct('stop_name')
+    )
     serializer_class = StopSerializer
-
-    def list(
-        self,
-        request: Request,
-        *args: object,
-        **kwargs: object,
-    ) -> Response:
-        stops = deduplicate_stops_by_name(self.get_queryset())
-        return Response(self.get_serializer(stops, many=True).data)
 
 
 class StopSuggestionView(APIView):
@@ -159,24 +116,20 @@ class StopSuggestionView(APIView):
         )
         query_serializer.is_valid(raise_exception=True)
         prefix = normalize_stop_name(query_serializer.validated_data['name'])
-        matching_stops = [
-            stop
-            for stop in Stop.objects.all()
-            if normalize_stop_name(stop.stop_name).startswith(prefix)
-        ]
-        stops = deduplicate_stops_by_name(matching_stops)
-        return Response(StopSerializer(stops, many=True).data)
-
-
-def deduplicate_stops_by_name(stops: Iterable[Stop]) -> list[Stop]:
-    unique_stops = []
-    seen_stop_names = set()
-    for stop in stops:
-        if stop.stop_name in seen_stop_names:
-            continue
-        unique_stops.append(stop)
-        seen_stop_names.add(stop.stop_name)
-    return unique_stops
+        matching_stops = sorted(
+            [
+                stop
+                for stop in Stop.objects.all()
+                if normalize_stop_name(stop.stop_name).startswith(prefix)
+            ],
+            key=lambda stop: (stop.stop_name, stop.stop_code, stop.stop_id),
+        )
+        unique_stops = {}
+        for stop in matching_stops:
+            unique_stops.setdefault(stop.stop_name, stop)
+        return Response(
+            StopSerializer(unique_stops.values(), many=True).data,
+        )
 
 
 def normalize_stop_name(value: str) -> str:
@@ -187,3 +140,110 @@ def normalize_stop_name(value: str) -> str:
         for character in decomposed
         if not unicodedata.combining(character)
     ).casefold()
+
+
+def route_response(
+    route: RouteOption,
+    stops_by_id: dict[str, Stop],
+    requested_departure: timedelta,
+) -> dict[str, object]:
+    segments = route.segments or route.legs
+    departure = (
+        route.departure_time
+        or (segments[0].departure_time if segments else requested_departure)
+    )
+    return {
+        'hops': route.hops,
+        'departure_time': departure,
+        'arrival_time': route.arrival_time,
+        'duration': route.arrival_time - departure,
+        'walking_time': route.walking_time,
+        'transfers': transfer_responses(route, stops_by_id),
+        'legs': [leg_response(leg, stops_by_id) for leg in route.legs],
+        'segments': [segment_response(segment, stops_by_id) for segment in segments],
+        'stops': [stops_by_id[stop_id] for stop_id in route.stop_ids],
+    }
+
+
+def leg_response(
+    leg: RouteLeg,
+    stops_by_id: dict[str, Stop],
+) -> dict[str, object]:
+    return {
+        'trip_id': leg.trip_id,
+        'route_id': leg.route_id,
+        'line_number': leg.line_number,
+        'line_name': leg.line_name,
+        'direction': leg.direction,
+        'direction_id': leg.direction_id,
+        'from_stop': stops_by_id[leg.from_stop_id],
+        'to_stop': stops_by_id[leg.to_stop_id],
+        'departure_time': leg.departure_time,
+        'arrival_time': leg.arrival_time,
+        'stops': [stops_by_id[stop_id] for stop_id in leg.stop_ids],
+    }
+
+
+def segment_response(
+    segment: RouteLeg | WalkLeg,
+    stops_by_id: dict[str, Stop],
+) -> dict[str, object]:
+    if isinstance(segment, RouteLeg):
+        return {
+            'mode': 'transit',
+            'duration': segment.arrival_time - segment.departure_time,
+            **leg_response(segment, stops_by_id),
+        }
+    return {
+        'mode': 'walk',
+        'from_stop': stops_by_id[segment.from_stop_id],
+        'to_stop': stops_by_id[segment.to_stop_id],
+        'departure_time': segment.departure_time,
+        'arrival_time': segment.arrival_time,
+        'duration': segment.duration,
+        'distance_meters': segment.distance_meters,
+    }
+
+
+def transfer_responses(
+    route: RouteOption,
+    stops_by_id: dict[str, Stop],
+) -> list[dict[str, object]]:
+    segments = route.segments or route.legs
+    transit_positions = [
+        index
+        for index, segment in enumerate(segments)
+        if isinstance(segment, RouteLeg)
+    ]
+    responses = []
+    for transfer_index, (previous_leg, next_leg) in enumerate(
+        zip(route.legs, route.legs[1:]),
+    ):
+        walking_time = timedelta(0)
+        if len(transit_positions) > transfer_index + 1:
+            previous_position = transit_positions[transfer_index]
+            next_position = transit_positions[transfer_index + 1]
+            walking_time = sum(
+                (
+                    segment.duration
+                    for segment in segments[previous_position + 1:next_position]
+                    if isinstance(segment, WalkLeg)
+                ),
+                timedelta(0),
+            )
+        responses.append(
+            {
+                'stop': stops_by_id[next_leg.from_stop_id],
+                'from_stop': stops_by_id[previous_leg.to_stop_id],
+                'to_stop': stops_by_id[next_leg.from_stop_id],
+                'arrival_time': previous_leg.arrival_time,
+                'departure_time': next_leg.departure_time,
+                'wait_time': next_leg.departure_time - previous_leg.arrival_time,
+                'walk_time': walking_time,
+                'from_route_id': previous_leg.route_id,
+                'from_line_number': previous_leg.line_number,
+                'to_route_id': next_leg.route_id,
+                'to_line_number': next_leg.line_number,
+            }
+        )
+    return responses
