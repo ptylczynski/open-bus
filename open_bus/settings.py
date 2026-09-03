@@ -120,10 +120,11 @@ GTFS_TEMP_DIR = Path(
         Path(tempfile.gettempdir()) / 'open_bus_gtfs',
     )
 )
-ROUTE_MAX_HOPS = int(os.environ.get('ROUTE_MAX_HOPS', '3'))
+ROUTE_MAX_HOPS = int(os.environ.get('ROUTE_MAX_HOPS', '1'))
 ROUTE_MAX_ALTERNATIVES_PER_HOP = int(
     os.environ.get('ROUTE_MAX_ALTERNATIVES_PER_HOP', '3')
 )
+ROUTE_MAX_ROUTES = int(os.environ.get('ROUTE_MAX_ROUTES', '5'))
 try:
     available_cpu_threads = len(os.sched_getaffinity(0))
 except AttributeError:
@@ -139,6 +140,24 @@ ROUTE_MIN_EXCHANGE_TIME_SECONDS = int(
 )
 ROUTE_MAX_EXCHANGE_TIME_SECONDS = int(
     os.environ.get('ROUTE_MAX_EXCHANGE_TIME_SECONDS', '3600')
+)
+ROUTE_MAX_WALK_DISTANCE_METERS = int(
+    os.environ.get('ROUTE_MAX_WALK_DISTANCE_METERS', '500')
+)
+ROUTE_WALK_SPEED_METERS_PER_SECOND = float(
+    os.environ.get('ROUTE_WALK_SPEED_METERS_PER_SECOND', '1.4')
+)
+ROUTE_MAX_EXTRA_TRAVEL_SECONDS = int(
+    os.environ.get('ROUTE_MAX_EXTRA_TRAVEL_SECONDS', '1800')
+)
+ROUTE_MAX_EXTRA_TRAVEL_RATIO = float(
+    os.environ.get('ROUTE_MAX_EXTRA_TRAVEL_RATIO', '1.5')
+)
+ROUTE_MAX_LABELS_PER_STOP = int(
+    os.environ.get('ROUTE_MAX_LABELS_PER_STOP', '4')
+)
+ROUTE_SNAPSHOT_CACHE_SIZE = int(
+    os.environ.get('ROUTE_SNAPSHOT_CACHE_SIZE', '2')
 )
 
 REST_FRAMEWORK = {
