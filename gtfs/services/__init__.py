@@ -3,7 +3,12 @@ from gtfs.services.downloader import (
     GtfsDownloadService,
 )
 from gtfs.services.importer import GtfsImportService
-from gtfs.services.router import RouteLeg, RouteOption, RouteSelectionService
+from gtfs.services.router import (
+    RouteLeg,
+    RouteOption,
+    RouteSelectionService,
+    WalkLeg,
+)
 
 
 __all__ = (
@@ -13,4 +18,5 @@ __all__ = (
     'RouteLeg',
     'RouteOption',
     'RouteSelectionService',
+    'WalkLeg',
 )
