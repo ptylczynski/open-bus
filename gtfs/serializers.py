@@ -4,6 +4,7 @@ from django.conf import settings
 from rest_framework import serializers
 
 from gtfs.models import Stop
+from gtfs.services.routing_data import default_service_date
 
 
 class RouteRequestSerializer(serializers.Serializer):
@@ -18,6 +19,11 @@ class RouteRequestSerializer(serializers.Serializer):
     departure_time = serializers.DurationField(
         min_value=timedelta(0),
     )
+    service_date = serializers.DateField(required=False)
+    hops = serializers.IntegerField(
+        min_value=0,
+        required=False,
+    )
     min_exchange_time = serializers.DurationField(
         min_value=timedelta(0),
         required=False,
@@ -28,6 +34,13 @@ class RouteRequestSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        if 'service_date' not in attrs:
+            try:
+                attrs['service_date'] = default_service_date()
+            except ValueError as error:
+                raise serializers.ValidationError(
+                    {'service_date': str(error)},
+                ) from error
         min_exchange_time = attrs.setdefault(
             'min_exchange_time',
             timedelta(seconds=settings.ROUTE_MIN_EXCHANGE_TIME_SECONDS),
@@ -76,23 +89,49 @@ class RouteLegSerializer(serializers.Serializer):
 
 class RouteTransferSerializer(serializers.Serializer):
     stop = StopSerializer()
+    from_stop = StopSerializer()
+    to_stop = StopSerializer()
     arrival_time = serializers.DurationField()
     departure_time = serializers.DurationField()
     wait_time = serializers.DurationField()
+    walk_time = serializers.DurationField()
     from_route_id = serializers.CharField()
     from_line_number = serializers.CharField(allow_blank=True)
     to_route_id = serializers.CharField()
     to_line_number = serializers.CharField(allow_blank=True)
 
 
+class RouteSegmentSerializer(serializers.Serializer):
+    mode = serializers.ChoiceField(choices=('transit', 'walk'))
+    from_stop = StopSerializer()
+    to_stop = StopSerializer()
+    departure_time = serializers.DurationField()
+    arrival_time = serializers.DurationField()
+    duration = serializers.DurationField()
+    distance_meters = serializers.IntegerField(min_value=0, required=False)
+    trip_id = serializers.CharField(required=False)
+    route_id = serializers.CharField(required=False)
+    line_number = serializers.CharField(allow_blank=True, required=False)
+    line_name = serializers.CharField(allow_blank=True, required=False)
+    direction = serializers.CharField(allow_blank=True, required=False)
+    direction_id = serializers.IntegerField(allow_null=True, required=False)
+    stops = StopSerializer(many=True, required=False)
+
+
 class RouteAlternativeSerializer(serializers.Serializer):
     hops = serializers.IntegerField(min_value=0)
+    departure_time = serializers.DurationField()
+    arrival_time = serializers.DurationField()
+    duration = serializers.DurationField()
+    walking_time = serializers.DurationField()
     transfers = RouteTransferSerializer(many=True)
     legs = RouteLegSerializer(many=True)
+    segments = RouteSegmentSerializer(many=True)
     stops = StopSerializer(many=True)
 
 
 class RouteResponseSerializer(serializers.Serializer):
+    service_date = serializers.DateField()
     routes = RouteAlternativeSerializer(many=True)
 
 
