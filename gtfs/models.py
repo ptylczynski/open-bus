@@ -112,6 +112,24 @@ class FeedInfo(models.Model):
         return self.feed_publisher_name
 
 
+class GtfsDatasetState(models.Model):
+    """Monotonic version used to invalidate in-process routing snapshots."""
+
+    singleton_id = models.PositiveSmallIntegerField(
+        primary_key=True,
+        default=1,
+        editable=False,
+    )
+    revision = models.PositiveBigIntegerField(default=0)
+
+    class Meta:
+        verbose_name = "GTFS dataset state"
+        verbose_name_plural = "GTFS dataset state"
+
+    def __str__(self) -> str:
+        return f"GTFS dataset revision {self.revision}"
+
+
 class Route(models.Model):
     route_id = models.CharField(primary_key=True, max_length=GTFS_ID_MAX_LENGTH)
     agency = models.ForeignKey(
