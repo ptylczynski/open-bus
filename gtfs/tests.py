@@ -1,8 +1,7 @@
 import io
 import zipfile
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Self
@@ -16,6 +15,7 @@ from gtfs.models import (
     Calendar,
     CalendarDate,
     FeedInfo,
+    GtfsDatasetState,
     Route,
     Shape,
     Stop,
@@ -30,6 +30,11 @@ from gtfs.services import (
     RouteLeg,
     RouteOption,
     RouteSelectionService,
+    WalkLeg,
+)
+from gtfs.services.routing_data import (
+    clear_routing_snapshot_cache,
+    get_routing_snapshot,
 )
 
 
@@ -334,6 +339,7 @@ class GtfsImportServiceTests(SimpleTestCase):
             '_import_trips',
             '_import_calendar_dates',
             '_import_stop_times',
+            '_advance_revision',
         ]
         events = Mock()
         archive = io.BytesIO()
@@ -413,6 +419,7 @@ class GtfsImportDatabaseTests(TestCase):
             StopTime.objects.get().arrival_time.total_seconds(),
             25 * 3600 + 10 * 60 + 5,
         )
+        self.assertEqual(GtfsDatasetState.objects.get().revision, 1)
 
     def test_invalid_archive_rolls_back_purge_and_partial_import(self) -> None:
         Agency.objects.create(
@@ -433,6 +440,7 @@ class GtfsImportDatabaseTests(TestCase):
 
         self.assertTrue(Agency.objects.filter(agency_id='old').exists())
         self.assertFalse(Agency.objects.filter(agency_id='1').exists())
+        self.assertFalse(GtfsDatasetState.objects.exists())
 
 
 class StopListViewTests(TestCase):
@@ -532,7 +540,7 @@ class StopListViewTests(TestCase):
             ],
         )
 
-    def test_lists_one_stop_for_each_name(self) -> None:
+    def test_lists_one_stop_for_each_stop_name(self) -> None:
         Stop.objects.create(
             stop_id='poznan-platform-2',
             stop_code='02',
@@ -606,7 +614,7 @@ class StopSuggestionViewTests(TestCase):
             ['lukasz'],
         )
 
-    def test_deduplicates_stop_suggestions_by_name(self) -> None:
+    def test_suggests_one_stop_for_each_stop_name(self) -> None:
         Stop.objects.create(
             stop_id='swiety-platform-2',
             stop_code='zzzz',
@@ -716,6 +724,7 @@ class RouteCreateViewTests(TestCase):
                 'from_stop_id': 'stop-0',
                 'to_stop_id': 'stop-1',
                 'departure_time': '08:00:00',
+                'service_date': '2026-09-04',
                 'min_exchange_time': '00:02:00',
                 'max_exchange_time': '00:20:00',
             },
@@ -723,6 +732,7 @@ class RouteCreateViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         routes = response.json()['routes']
+        self.assertEqual(response.json()['service_date'], '2026-09-04')
         self.assertEqual(
             [route['hops'] for route in routes],
             [0, 1],
@@ -748,9 +758,12 @@ class RouteCreateViewTests(TestCase):
             routes[1]['transfers'][0],
             {
                 'stop': routes[1]['stops'][1],
+                'from_stop': routes[1]['stops'][1],
+                'to_stop': routes[1]['stops'][1],
                 'arrival_time': '08:10:00',
                 'departure_time': '08:15:00',
                 'wait_time': '00:05:00',
+                'walk_time': '00:00:00',
                 'from_route_id': 'route-20',
                 'from_line_number': '20',
                 'to_route_id': 'route-30',
@@ -773,12 +786,19 @@ class RouteCreateViewTests(TestCase):
                 'stops': routes[1]['stops'][1:],
             },
         )
+        self.assertEqual(
+            [segment['mode'] for segment in routes[1]['segments']],
+            ['transit', 'transit'],
+        )
+        self.assertEqual(routes[1]['arrival_time'], '08:30:00')
+        self.assertEqual(routes[1]['walking_time'], '00:00:00')
         find_routes.assert_called_once_with(
             'stop-0',
             'stop-1',
             departure_time=timedelta(hours=8),
             min_exchange_time=timedelta(minutes=2),
             max_exchange_time=timedelta(minutes=20),
+            service_date=date(2026, 9, 4),
         )
 
     @override_settings(
@@ -796,6 +816,7 @@ class RouteCreateViewTests(TestCase):
                 'from_stop_id': 'stop-0',
                 'to_stop_id': 'stop-1',
                 'departure_time': '08:00:00',
+                'service_date': '2026-09-04',
             },
         )
 
@@ -807,7 +828,45 @@ class RouteCreateViewTests(TestCase):
             departure_time=timedelta(hours=8),
             min_exchange_time=timedelta(minutes=3),
             max_exchange_time=timedelta(minutes=15),
+            service_date=date(2026, 9, 4),
         )
+
+    @patch('gtfs.views.RouteSelectionService')
+    def test_uses_requested_hop_limit(
+        self,
+        route_service_class: Mock,
+    ) -> None:
+        route_service = route_service_class.return_value
+        route_service.find_routes.return_value = []
+        route_service.max_hops = 2
+
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'stop-0',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+                'hops': 2,
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn('2 hop(s)', response.json()['detail'])
+        route_service_class.assert_called_once_with(max_hops=2)
+
+    def test_rejects_negative_hop_limit(self) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'stop-0',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+                'hops': -1,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('hops', response.json())
 
     def test_rejects_unknown_from_stop_id(self) -> None:
         response = self.client.post(
@@ -860,6 +919,11 @@ class RouteCreateViewTests(TestCase):
         self.assertIn('max_exchange_time', response.json())
 
 
+@override_settings(
+    ROUTE_MAX_WALK_DISTANCE_METERS=0,
+    ROUTE_MAX_EXTRA_TRAVEL_SECONDS=86_400,
+    ROUTE_MAX_EXTRA_TRAVEL_RATIO=100,
+)
 class RouteSelectionServiceTests(TestCase):
     def setUp(self) -> None:
         agency = Agency.objects.create(
@@ -939,7 +1003,27 @@ class RouteSelectionServiceTests(TestCase):
 
         self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
 
-    def test_starts_from_every_stop_with_the_selected_stop_name(self) -> None:
+    def test_logs_route_search_progress_and_result(self) -> None:
+        self._create_trip(
+            'direct',
+            ('a', 'c', 'b'),
+            timedelta(hours=8),
+        )
+
+        with self.assertLogs('gtfs.services.router', level='INFO') as logs:
+            RouteSelectionService(max_hops=0).find_routes(
+                'a',
+                'b',
+                departure_time=timedelta(hours=7, minutes=30),
+            )
+
+        messages = '\n'.join(logs.output)
+        self.assertIn('Starting RAPTOR route search', messages)
+        self.assertIn('Searching RAPTOR round 1', messages)
+        self.assertIn('RAPTOR route search complete', messages)
+        self.assertIn('routes=1', messages)
+
+    def test_uses_all_stops_with_the_selected_start_name(self) -> None:
         Stop.objects.create(
             stop_id='a-platform-2',
             stop_name='Stop A',
@@ -959,6 +1043,35 @@ class RouteSelectionServiceTests(TestCase):
         )
 
         self.assertEqual(stop_ids, ['a-platform-2', 'c', 'b'])
+
+    def test_uses_all_stops_with_the_selected_destination_name(
+        self,
+    ) -> None:
+        Stop.objects.create(
+            stop_id='b-platform-2',
+            stop_name='Stop B',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+        )
+        self._create_trip(
+            'second',
+            ('a', 'd', 'b-platform-2'),
+            timedelta(hours=8),
+        )
+
+        routes = RouteSelectionService(
+            max_hops=0,
+            max_alternatives_per_hop=2,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(
+            [route.stop_ids for route in routes],
+            [('a', 'd', 'b-platform-2')],
+        )
 
     def test_shares_per_hop_alternative_limit_between_starting_stops(
         self,
@@ -1026,7 +1139,7 @@ class RouteSelectionServiceTests(TestCase):
         )
 
     @override_settings(ROUTE_CALCULATION_WORKERS=2)
-    def test_finds_connection_with_one_transfer_in_parallel(self) -> None:
+    def test_accepts_deprecated_worker_setting(self) -> None:
         self._create_trip('first', ('a', 'c'), timedelta(hours=8))
         self._create_trip(
             'second',
@@ -1034,28 +1147,17 @@ class RouteSelectionServiceTests(TestCase):
             timedelta(hours=8, minutes=15),
         )
 
-        original_map = ThreadPoolExecutor.map
-        with patch.object(
-            ThreadPoolExecutor,
-            'map',
-            autospec=True,
-            side_effect=original_map,
-        ) as executor_map:
-            with patch(
-                'gtfs.services.router.ThreadPoolExecutor',
-                side_effect=ThreadPoolExecutor,
-            ) as executor_class:
-                stop_ids = RouteSelectionService(max_hops=1).find_route(
-                    'a',
-                    'b',
-                    departure_time=timedelta(hours=7, minutes=30),
-                )
+        service = RouteSelectionService(max_hops=1)
+        stop_ids = service.find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
 
         self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
-        executor_class.assert_called_once_with(max_workers=2)
-        self.assertEqual(executor_map.call_count, 2)
+        self.assertEqual(service.max_workers, 2)
 
-    def test_prefers_direct_connection_over_transfer(self) -> None:
+    def test_prefers_earlier_arrival_over_fewer_transfers(self) -> None:
         self._create_trip('first', ('a', 'c'), timedelta(hours=8))
         self._create_trip(
             'second',
@@ -1070,7 +1172,7 @@ class RouteSelectionServiceTests(TestCase):
             departure_time=timedelta(hours=7, minutes=30),
         )
 
-        self.assertEqual(stop_ids, ['a', 'd', 'b'])
+        self.assertEqual(stop_ids, ['a', 'c', 'b'])
 
     def test_returns_alternatives_for_every_hop_count(self) -> None:
         self._create_trip('direct', ('a', 'd', 'b'), timedelta(hours=9))
@@ -1087,10 +1189,107 @@ class RouteSelectionServiceTests(TestCase):
             departure_time=timedelta(hours=7, minutes=30),
         )
 
-        self.assertEqual([route.hops for route in routes], [0, 1])
+        self.assertEqual([route.hops for route in routes], [1, 0])
         self.assertEqual(
             [route.stop_ids for route in routes],
-            [('a', 'd', 'b'), ('a', 'c', 'e', 'b')],
+            [('a', 'c', 'e', 'b'), ('a', 'd', 'b')],
+        )
+
+    def test_selects_the_earliest_route_without_geographic_bias(
+        self,
+    ) -> None:
+        Stop.objects.filter(stop_id='a').update(stop_lat=0, stop_lon=0)
+        Stop.objects.filter(stop_id='b').update(stop_lat=0, stop_lon=10)
+        Stop.objects.filter(stop_id='c').update(stop_lat=0, stop_lon=9)
+        Stop.objects.filter(stop_id='d').update(stop_lat=0, stop_lon=-5)
+        Stop.objects.filter(stop_id='e').update(stop_lat=0, stop_lon='9.5')
+        self._create_trip('toward-1', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'toward-2',
+            ('c', 'e'),
+            timedelta(hours=8, minutes=15),
+        )
+        self._create_trip(
+            'toward-3',
+            ('e', 'b'),
+            timedelta(hours=8, minutes=30),
+        )
+        self._create_trip('away-1', ('a', 'd'), timedelta(hours=8))
+        self._create_trip(
+            'away-2',
+            ('d', 'b'),
+            timedelta(hours=8, minutes=15),
+        )
+
+        routes = RouteSelectionService(
+            max_hops=2,
+            max_workers=1,
+            max_routes=1,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual([route.hops for route in routes], [1])
+        self.assertEqual(routes[0].stop_ids, ('a', 'd', 'b'))
+
+    def test_allows_a_route_that_temporarily_moves_away(self) -> None:
+        Stop.objects.filter(stop_id='a').update(stop_lat=0, stop_lon=0)
+        Stop.objects.filter(stop_id='b').update(stop_lat=0, stop_lon=10)
+        Stop.objects.filter(stop_id='c').update(stop_lat=0, stop_lon=-5)
+        self._create_trip('away', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'back',
+            ('c', 'b'),
+            timedelta(hours=8, minutes=15),
+        )
+
+        routes = RouteSelectionService(max_hops=1).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual([route.stop_ids for route in routes], [('a', 'c', 'b')])
+
+    def test_treats_a_same_name_stop_as_the_destination(self) -> None:
+        Stop.objects.filter(stop_id='a').update(stop_lat=0, stop_lon=0)
+        Stop.objects.filter(stop_id='b').update(stop_lat=0, stop_lon=10)
+        Stop.objects.filter(stop_id='c').update(stop_lat=0, stop_lon='-9.5')
+        Stop.objects.filter(stop_id='d').update(stop_lat=0, stop_lon=9)
+        Stop.objects.create(
+            stop_id='b-platform-2',
+            stop_name='Stop B',
+            stop_lat=0,
+            stop_lon=-10,
+        )
+        self._create_trip('west-1', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'west-2',
+            ('c', 'b-platform-2'),
+            timedelta(hours=8, minutes=15),
+        )
+        self._create_trip('east-1', ('a', 'd'), timedelta(hours=8))
+        self._create_trip(
+            'east-2',
+            ('d', 'b'),
+            timedelta(hours=8, minutes=15),
+        )
+
+        routes = RouteSelectionService(
+            max_hops=1,
+            max_workers=1,
+            max_routes=1,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(
+            [route.stop_ids for route in routes],
+            [('a', 'c', 'b-platform-2')],
         )
 
     def test_limits_alternatives_independently_for_each_hop_count(self) -> None:
@@ -1119,12 +1318,11 @@ class RouteSelectionServiceTests(TestCase):
             departure_time=timedelta(hours=7, minutes=30),
         )
 
-        self.assertEqual([route.hops for route in routes], [0, 0, 1, 1])
+        self.assertEqual([route.hops for route in routes], [0, 1, 1])
         self.assertEqual(
             [route.stop_ids for route in routes],
             [
                 ('a', 'c', 'b'),
-                ('a', 'd', 'b'),
                 ('a', 'c', 'd', 'b'),
                 ('a', 'd', 'e', 'b'),
             ],
@@ -1146,12 +1344,57 @@ class RouteSelectionServiceTests(TestCase):
             [('a', 'c', 'b')],
         )
 
+    @override_settings(ROUTE_MAX_ROUTES=1)
+    def test_uses_configured_global_route_limit(self) -> None:
+        self._create_trip('direct-1', ('a', 'c', 'b'), timedelta(hours=8))
+        self._create_trip('direct-2', ('a', 'd', 'b'), timedelta(hours=9))
+
+        routes = RouteSelectionService(
+            max_alternatives_per_hop=2,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(
+            [route.stop_ids for route in routes],
+            [('a', 'c', 'b')],
+        )
+
+    def test_global_route_limit_applies_across_hop_counts(self) -> None:
+        self._create_trip('direct', ('a', 'd', 'b'), timedelta(hours=9))
+        self._create_trip('first', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'second',
+            ('c', 'e', 'b'),
+            timedelta(hours=8, minutes=15),
+        )
+
+        routes = RouteSelectionService(
+            max_hops=1,
+            max_routes=1,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+        )
+
+        self.assertEqual(len(routes), 1)
+
     def test_rejects_non_positive_alternative_limit(self) -> None:
         with self.assertRaisesMessage(
             ValueError,
             'ROUTE_MAX_ALTERNATIVES_PER_HOP must be at least one',
         ):
             RouteSelectionService(max_alternatives_per_hop=0)
+
+    def test_rejects_non_positive_global_route_limit(self) -> None:
+        with self.assertRaisesMessage(
+            ValueError,
+            'ROUTE_MAX_ROUTES must be at least one',
+        ):
+            RouteSelectionService(max_routes=0)
 
     def test_respects_trip_direction(self) -> None:
         self._create_trip(
@@ -1249,3 +1492,215 @@ class RouteSelectionServiceTests(TestCase):
         )
 
         self.assertIsNone(stop_ids)
+
+    def test_keeps_later_arrival_needed_by_maximum_exchange_time(self) -> None:
+        self._create_trip('early', ('a', 'c'), timedelta(hours=8))
+        self._create_trip(
+            'later',
+            ('a', 'c'),
+            timedelta(hours=8, minutes=35),
+        )
+        self._create_trip(
+            'connection',
+            ('c', 'b'),
+            timedelta(hours=9),
+        )
+
+        routes = RouteSelectionService(max_hops=1).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=30),
+            max_exchange_time=timedelta(minutes=30),
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(
+            [leg.trip_id for leg in routes[0].legs],
+            ['later', 'connection'],
+        )
+
+    def test_filters_trips_by_service_date_and_exception(self) -> None:
+        Calendar.objects.filter(pk=self.calendar.pk).update(
+            monday=True,
+            tuesday=False,
+            wednesday=False,
+            thursday=False,
+            friday=False,
+            saturday=False,
+            sunday=False,
+        )
+        self._create_trip('monday', ('a', 'b'), timedelta(hours=8))
+
+        monday = RouteSelectionService(max_hops=0).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7),
+            service_date=date(2026, 9, 7),
+        )
+        tuesday = RouteSelectionService(max_hops=0).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7),
+            service_date=date(2026, 9, 8),
+        )
+        CalendarDate.objects.create(
+            service=self.calendar,
+            date=date(2026, 9, 8),
+            exception_type=1,
+        )
+        added_tuesday = RouteSelectionService(max_hops=0).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7),
+            service_date=date(2026, 9, 8),
+        )
+
+        self.assertEqual(monday, ['a', 'b'])
+        self.assertIsNone(tuesday)
+        self.assertEqual(added_tuesday, ['a', 'b'])
+
+    def test_respects_pickup_and_drop_off_restrictions(self) -> None:
+        self._create_trip('restricted', ('a', 'c', 'b'), timedelta(hours=8))
+        StopTime.objects.filter(trip_id='restricted', stop_id='a').update(
+            pickup_type=1,
+        )
+
+        route = RouteSelectionService(max_hops=0).find_route(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7),
+        )
+
+        self.assertIsNone(route)
+
+
+@override_settings(
+    ROUTE_MAX_WALK_DISTANCE_METERS=500,
+    ROUTE_WALK_SPEED_METERS_PER_SECOND=1.4,
+)
+class RoutingWalkingTests(TestCase):
+    def setUp(self) -> None:
+        agency = Agency.objects.create(
+            agency_id='agency',
+            agency_name='Transit',
+            agency_url='https://example.com',
+            agency_timezone='Europe/Warsaw',
+        )
+        calendar = Calendar.objects.create(
+            service_id='service',
+            monday=True,
+            tuesday=True,
+            wednesday=True,
+            thursday=True,
+            friday=True,
+            saturday=True,
+            sunday=True,
+            start_date='2026-01-01',
+            end_date='2026-12-31',
+        )
+        route = Route.objects.create(
+            route_id='route',
+            agency=agency,
+            route_short_name='1',
+            route_type=3,
+        )
+        for stop_id, latitude, longitude in (
+            ('a', 52.0, 16.0),
+            ('c', 52.01, 16.0),
+            ('d', 52.0127, 16.0),
+            ('b', 52.03, 16.0),
+        ):
+            Stop.objects.create(
+                stop_id=stop_id,
+                stop_name=stop_id.upper(),
+                stop_lat=latitude,
+                stop_lon=longitude,
+            )
+        first = Trip.objects.create(
+            trip_id='first',
+            route=route,
+            service=calendar,
+        )
+        second = Trip.objects.create(
+            trip_id='second',
+            route=route,
+            service=calendar,
+        )
+        StopTime.objects.bulk_create(
+            [
+                StopTime(
+                    trip=first,
+                    stop_id='a',
+                    stop_sequence=0,
+                    arrival_time=timedelta(hours=8),
+                    departure_time=timedelta(hours=8),
+                ),
+                StopTime(
+                    trip=first,
+                    stop_id='c',
+                    stop_sequence=1,
+                    arrival_time=timedelta(hours=8, minutes=10),
+                    departure_time=timedelta(hours=8, minutes=10),
+                ),
+                StopTime(
+                    trip=second,
+                    stop_id='d',
+                    stop_sequence=0,
+                    arrival_time=timedelta(hours=8, minutes=20),
+                    departure_time=timedelta(hours=8, minutes=20),
+                ),
+                StopTime(
+                    trip=second,
+                    stop_id='b',
+                    stop_sequence=1,
+                    arrival_time=timedelta(hours=8, minutes=35),
+                    departure_time=timedelta(hours=8, minutes=35),
+                ),
+            ]
+        )
+
+    def test_walks_between_nearby_transfer_stops(self) -> None:
+        routes = RouteSelectionService(max_hops=1).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=50),
+            service_date=date(2026, 9, 4),
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].stop_ids, ('a', 'c', 'd', 'b'))
+        self.assertEqual(routes[0].hops, 1)
+        self.assertEqual(
+            [type(segment) for segment in routes[0].segments],
+            [RouteLeg, WalkLeg, RouteLeg],
+        )
+        self.assertGreater(routes[0].walking_time, timedelta(0))
+
+    def test_does_not_walk_beyond_the_configured_radius(self) -> None:
+        routes = RouteSelectionService(max_hops=0).find_routes(
+            'a',
+            'c',
+            departure_time=timedelta(hours=7),
+            service_date=date(2026, 9, 4),
+        )
+
+        self.assertEqual(routes[0].stop_ids, ('a', 'c'))
+        self.assertEqual([type(segment) for segment in routes[0].segments], [RouteLeg])
+
+
+class RoutingSnapshotCacheTests(TestCase):
+    def tearDown(self) -> None:
+        clear_routing_snapshot_cache()
+
+    def test_reuses_snapshot_for_a_committed_revision(self) -> None:
+        GtfsDatasetState.objects.create(singleton_id=1, revision=1)
+
+        with patch(
+            'gtfs.services.routing_data._build_snapshot',
+            wraps=get_routing_snapshot.__globals__['_build_snapshot'],
+        ) as build_snapshot:
+            first = get_routing_snapshot(date(2026, 9, 4))
+            second = get_routing_snapshot(date(2026, 9, 4))
+
+        self.assertIs(first, second)
+        self.assertEqual(build_snapshot.call_count, 1)
