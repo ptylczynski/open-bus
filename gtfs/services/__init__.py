@@ -9,12 +9,14 @@ from gtfs.services.router import (
     RouteSelectionService,
     WalkLeg,
 )
+from gtfs.services.stop_locator import NearestStopService
 
 
 __all__ = (
     'GtfsDownloadBatchError',
     'GtfsDownloadService',
     'GtfsImportService',
+    'NearestStopService',
     'RouteLeg',
     'RouteOption',
     'RouteSelectionService',
