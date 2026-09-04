@@ -1,9 +1,15 @@
 from django.urls import path
 
-from gtfs.views import RouteCreateView, StopListView, StopSuggestionView
+from gtfs.views import (
+    GeocodeView,
+    RouteCreateView,
+    StopListView,
+    StopSuggestionView,
+)
 
 
 urlpatterns = [
+    path('geocode/', GeocodeView.as_view(), name='geocode'),
     path('routes/', RouteCreateView.as_view(), name='route-create'),
     path(
         'stops/suggest/',
