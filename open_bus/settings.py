@@ -135,7 +135,7 @@ ROUTE_MAX_HOPS = int(os.environ.get('ROUTE_MAX_HOPS', '1'))
 ROUTE_MAX_ALTERNATIVES_PER_HOP = int(
     os.environ.get('ROUTE_MAX_ALTERNATIVES_PER_HOP', '3')
 )
-ROUTE_MAX_ROUTES = int(os.environ.get('ROUTE_MAX_ROUTES', '5'))
+ROUTE_MAX_ROUTES = int(os.environ.get('ROUTE_MAX_ROUTES', '15'))
 try:
     available_cpu_threads = len(os.sched_getaffinity(0))
 except AttributeError:
@@ -154,6 +154,9 @@ ROUTE_MAX_EXCHANGE_TIME_SECONDS = int(
 )
 ROUTE_MAX_WALK_DISTANCE_METERS = int(
     os.environ.get('ROUTE_MAX_WALK_DISTANCE_METERS', '500')
+)
+ROUTE_MAX_COORDINATE_STOPS = int(
+    os.environ.get('ROUTE_MAX_COORDINATE_STOPS', '1')
 )
 ROUTE_WALK_SPEED_METERS_PER_SECOND = float(
     os.environ.get('ROUTE_WALK_SPEED_METERS_PER_SECOND', '1.4')
