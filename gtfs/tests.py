@@ -733,6 +733,8 @@ class RouteCreateViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         routes = response.json()['routes']
         self.assertEqual(response.json()['service_date'], '2026-09-04')
+        self.assertEqual(response.json()['from_stop'], routes[0]['stops'][0])
+        self.assertEqual(response.json()['to_stop'], routes[0]['stops'][-1])
         self.assertEqual(
             [route['hops'] for route in routes],
             [0, 1],
@@ -800,6 +802,70 @@ class RouteCreateViewTests(TestCase):
             max_exchange_time=timedelta(minutes=20),
             service_date=date(2026, 9, 4),
         )
+
+    @patch('gtfs.views.RouteSelectionService.find_routes', return_value=[])
+    def test_finds_nearest_stops_for_coordinates(
+        self,
+        find_routes: Mock,
+    ) -> None:
+        Stop.objects.filter(stop_id='stop-0').update(
+            stop_lat=0,
+            stop_lon=0,
+        )
+        Stop.objects.filter(stop_id='stop-1').update(
+            stop_lat=10,
+            stop_lon=10,
+        )
+
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_lat': '0.001',
+                'from_lon': '0.001',
+                'to_lat': '10.001',
+                'to_lon': '10.001',
+                'departure_time': '08:00:00',
+                'service_date': '2026-09-04',
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        find_routes.assert_called_once_with(
+            'stop-0',
+            'stop-1',
+            departure_time=timedelta(hours=8),
+            min_exchange_time=timedelta(0),
+            max_exchange_time=timedelta(hours=1),
+            service_date=date(2026, 9, 4),
+        )
+
+    def test_requires_complete_coordinates(self) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_lat': '52.4',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('from_lon', response.json())
+
+    def test_rejects_stop_id_combined_with_coordinates(self) -> None:
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_stop_id': 'stop-0',
+                'from_lat': '52.4',
+                'from_lon': '16.9',
+                'to_stop_id': 'stop-1',
+                'departure_time': '08:00:00',
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('from_stop_id', response.json())
 
     @override_settings(
         ROUTE_MIN_EXCHANGE_TIME_SECONDS=180,
@@ -1685,7 +1751,126 @@ class RoutingWalkingTests(TestCase):
         )
 
         self.assertEqual(routes[0].stop_ids, ('a', 'c'))
-        self.assertEqual([type(segment) for segment in routes[0].segments], [RouteLeg])
+        self.assertEqual(
+            [type(segment) for segment in routes[0].segments],
+            [RouteLeg],
+        )
+
+
+@override_settings(
+    ROUTE_MAX_WALK_DISTANCE_METERS=500,
+    ROUTE_WALK_SPEED_METERS_PER_SECOND=1.4,
+    ROUTE_MAX_EXTRA_TRAVEL_SECONDS=86_400,
+    ROUTE_MAX_EXTRA_TRAVEL_RATIO=100,
+)
+class TerminalWalkCollapseTests(TestCase):
+    def setUp(self) -> None:
+        agency = Agency.objects.create(
+            agency_id='agency',
+            agency_name='Transit',
+            agency_url='https://example.com',
+            agency_timezone='Europe/Warsaw',
+        )
+        self.calendar = Calendar.objects.create(
+            service_id='service',
+            monday=True,
+            tuesday=True,
+            wednesday=True,
+            thursday=True,
+            friday=True,
+            saturday=True,
+            sunday=True,
+            start_date='2026-01-01',
+            end_date='2026-12-31',
+        )
+        self.route = Route.objects.create(
+            route_id='route',
+            agency=agency,
+            route_short_name='1',
+            route_type=3,
+        )
+        for stop_id, latitude in (
+            ('a', 52.0000),
+            ('s1', 52.0100),
+            ('s2', 52.0200),
+            ('s3', 52.0300),
+            ('s4', 52.0400),
+            ('s5', 52.0410),
+            ('b', 52.0411),
+        ):
+            Stop.objects.create(
+                stop_id=stop_id,
+                stop_name=stop_id.upper(),
+                stop_lat=latitude,
+                stop_lon=16.0,
+            )
+
+    def _create_trip(self, stop_ids: tuple[str, ...]) -> None:
+        trip = Trip.objects.create(
+            trip_id='bus-a',
+            route=self.route,
+            service=self.calendar,
+        )
+        StopTime.objects.bulk_create(
+            [
+                StopTime(
+                    trip=trip,
+                    stop_id=stop_id,
+                    stop_sequence=index,
+                    arrival_time=timedelta(hours=8, minutes=index * 10),
+                    departure_time=timedelta(hours=8, minutes=index * 10),
+                )
+                for index, stop_id in enumerate(stop_ids)
+            ]
+        )
+
+    def test_keeps_later_alighting_stop_with_shorter_final_walk(self) -> None:
+        self._create_trip(('a', 's1', 's2', 's3', 's4', 's5'))
+
+        routes = RouteSelectionService(
+            max_hops=0,
+            max_alternatives_per_hop=5,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=50),
+            service_date=date(2026, 9, 4),
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(
+            routes[0].stop_ids,
+            ('a', 's1', 's2', 's3', 's4', 's5', 'b'),
+        )
+        self.assertEqual(routes[0].legs[-1].to_stop_id, 's5')
+        self.assertEqual(
+            [type(segment) for segment in routes[0].segments],
+            [RouteLeg, WalkLeg],
+        )
+
+    def test_keeps_bus_ride_to_destination_instead_of_early_walk(self) -> None:
+        self._create_trip(('a', 's1', 's2', 's3', 's4', 'b'))
+
+        routes = RouteSelectionService(
+            max_hops=0,
+            max_alternatives_per_hop=5,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=50),
+            service_date=date(2026, 9, 4),
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(
+            routes[0].stop_ids,
+            ('a', 's1', 's2', 's3', 's4', 'b'),
+        )
+        self.assertEqual(
+            [type(segment) for segment in routes[0].segments],
+            [RouteLeg],
+        )
+        self.assertEqual(routes[0].walking_time, timedelta(0))
 
 
 class RoutingSnapshotCacheTests(TestCase):
