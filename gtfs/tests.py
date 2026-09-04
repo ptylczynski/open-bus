@@ -1598,22 +1598,40 @@ class RouteSelectionServiceTests(TestCase):
         self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
         self.assertEqual(service.max_workers, 2)
 
-    def test_prefers_fewer_transfers_over_earlier_arrival(self) -> None:
-        self._create_trip('first', ('a', 'c'), timedelta(hours=8))
+    @override_settings(
+        ROUTE_MAX_EXTRA_TRAVEL_SECONDS=1800,
+        ROUTE_MAX_EXTRA_TRAVEL_RATIO=1.5,
+    )
+    def test_prefers_staying_on_route_over_a_faster_change(self) -> None:
+        Stop.objects.create(
+            stop_id='f',
+            stop_name='Stop F',
+            stop_lat='52.400000000000',
+            stop_lon='16.900000000000',
+        )
         self._create_trip(
-            'second',
+            'stay-on',
+            ('a', 'c', 'd', 'e', 'f', 'b'),
+            timedelta(hours=8),
+        )
+        self._create_trip(
+            'change',
             ('c', 'b'),
             timedelta(hours=8, minutes=15),
         )
-        self._create_trip('third', ('a', 'd', 'b'), timedelta(hours=9))
 
-        stop_ids = RouteSelectionService(max_hops=1).find_route(
+        routes = RouteSelectionService(
+            max_hops=1,
+            max_routes=1,
+        ).find_routes(
             'a',
             'b',
-            departure_time=timedelta(hours=7, minutes=30),
+            departure_time=timedelta(hours=7, minutes=55),
         )
 
-        self.assertEqual(stop_ids, ['a', 'd', 'b'])
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].stop_ids, ('a', 'c', 'd', 'e', 'f', 'b'))
+        self.assertEqual([leg.trip_id for leg in routes[0].legs], ['stay-on'])
 
     @override_settings(ROUTE_MAX_WALK_DISTANCE_METERS=500)
     def test_prefers_no_walking_over_an_earlier_arrival(self) -> None:
