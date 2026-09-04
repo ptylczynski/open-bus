@@ -686,6 +686,7 @@ class RouteSelectionService:
         labels: list[_Label],
         requested_departure: int,
     ) -> list[RouteOption]:
+        labels = self._collapse_terminal_walk_alternatives(labels)
         distinct = {}
         for label in labels:
             signature = self._signature(label)
@@ -773,6 +774,74 @@ class RouteSelectionService:
             if len(routes) == self.max_routes:
                 break
         return routes
+
+    @staticmethod
+    def _collapse_terminal_walk_alternatives(
+        labels: list[_Label],
+    ) -> list[_Label]:
+        grouped: dict[tuple[object, ...], list[_Label]] = defaultdict(list)
+        ungrouped = []
+        for label in labels:
+            terminal_walk = (
+                label.segments[-1]
+                if label.segments
+                and isinstance(label.segments[-1], WalkLeg)
+                else None
+            )
+            transit_index = len(label.segments) - 1
+            if terminal_walk is not None:
+                transit_index -= 1
+            if (
+                transit_index < 0
+                or not isinstance(label.segments[transit_index], RouteLeg)
+            ):
+                ungrouped.append(label)
+                continue
+
+            final_transit = label.segments[transit_index]
+            key = (
+                label.segments[:transit_index],
+                final_transit.trip_id,
+                final_transit.from_stop_id,
+                final_transit.departure_time,
+            )
+            grouped[key].append(label)
+
+        collapsed = list(ungrouped)
+        for alternatives in grouped.values():
+            if not any(
+                isinstance(label.segments[-1], WalkLeg)
+                for label in alternatives
+            ):
+                collapsed.extend(alternatives)
+                continue
+            collapsed.append(
+                min(
+                    alternatives,
+                    key=RouteSelectionService._terminal_preference,
+                )
+            )
+        return collapsed
+
+    @staticmethod
+    def _terminal_preference(label: _Label) -> tuple[object, ...]:
+        terminal_walk = (
+            label.segments[-1]
+            if isinstance(label.segments[-1], WalkLeg)
+            else None
+        )
+        final_transit = (
+            label.segments[-2]
+            if terminal_walk is not None
+            else label.segments[-1]
+        )
+        assert isinstance(final_transit, RouteLeg)
+        return (
+            terminal_walk.distance_meters if terminal_walk is not None else 0,
+            -len(final_transit.stop_ids),
+            label.time,
+            RouteSelectionService._signature(label),
+        )
 
     @staticmethod
     def _route_dominates(first: _Label, second: _Label) -> bool:
