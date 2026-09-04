@@ -5,16 +5,47 @@ from rest_framework import serializers
 
 from gtfs.models import Stop
 from gtfs.services.routing_data import default_service_date
+from gtfs.services.stop_locator import NearestStopService
 
 
 class RouteRequestSerializer(serializers.Serializer):
     from_stop_id = serializers.PrimaryKeyRelatedField(
         queryset=Stop.objects.all(),
         source='from_stop',
+        required=False,
     )
     to_stop_id = serializers.PrimaryKeyRelatedField(
         queryset=Stop.objects.all(),
         source='to_stop',
+        required=False,
+    )
+    from_lat = serializers.DecimalField(
+        max_digits=15,
+        decimal_places=12,
+        min_value=-90,
+        max_value=90,
+        required=False,
+    )
+    from_lon = serializers.DecimalField(
+        max_digits=15,
+        decimal_places=12,
+        min_value=-180,
+        max_value=180,
+        required=False,
+    )
+    to_lat = serializers.DecimalField(
+        max_digits=15,
+        decimal_places=12,
+        min_value=-90,
+        max_value=90,
+        required=False,
+    )
+    to_lon = serializers.DecimalField(
+        max_digits=15,
+        decimal_places=12,
+        min_value=-180,
+        max_value=180,
+        required=False,
     )
     departure_time = serializers.DurationField(
         min_value=timedelta(0),
@@ -34,6 +65,12 @@ class RouteRequestSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        location_errors = {}
+        for prefix in ('from', 'to'):
+            location_errors.update(self._resolve_stop(attrs, prefix))
+        if location_errors:
+            raise serializers.ValidationError(location_errors)
+
         if 'service_date' not in attrs:
             try:
                 attrs['service_date'] = default_service_date()
@@ -58,6 +95,47 @@ class RouteRequestSerializer(serializers.Serializer):
                 },
             )
         return attrs
+
+    @staticmethod
+    def _resolve_stop(
+        attrs: dict[str, object],
+        prefix: str,
+    ) -> dict[str, str]:
+        stop_key = f'{prefix}_stop'
+        latitude_key = f'{prefix}_lat'
+        longitude_key = f'{prefix}_lon'
+        has_stop = stop_key in attrs
+        has_latitude = latitude_key in attrs
+        has_longitude = longitude_key in attrs
+
+        if has_stop and (has_latitude or has_longitude):
+            return {
+                f'{prefix}_stop_id': (
+                    'Do not combine a stop ID with coordinates.'
+                ),
+            }
+        if has_stop:
+            return {}
+        if not has_latitude and not has_longitude:
+            return {
+                f'{prefix}_stop_id': (
+                    f'Provide {prefix}_stop_id or both {latitude_key} and '
+                    f'{longitude_key}.'
+                ),
+            }
+        if not has_latitude:
+            return {latitude_key: 'This field is required with coordinates.'}
+        if not has_longitude:
+            return {longitude_key: 'This field is required with coordinates.'}
+
+        stop = NearestStopService.find_nearest(
+            attrs[latitude_key],
+            attrs[longitude_key],
+        )
+        if stop is None:
+            return {latitude_key: 'No stops are available.'}
+        attrs[stop_key] = stop
+        return {}
 
 
 class StopSerializer(serializers.ModelSerializer):
@@ -132,6 +210,8 @@ class RouteAlternativeSerializer(serializers.Serializer):
 
 class RouteResponseSerializer(serializers.Serializer):
     service_date = serializers.DateField()
+    from_stop = StopSerializer()
+    to_stop = StopSerializer()
     routes = RouteAlternativeSerializer(many=True)
 
 
