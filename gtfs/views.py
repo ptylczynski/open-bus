@@ -10,12 +10,60 @@ from rest_framework.views import APIView
 from gtfs.models import Stop
 from gtfs.serializers import (
     ErrorResponseSerializer,
+    GeocodeQuerySerializer,
+    GeocodeSuggestionSerializer,
     RouteRequestSerializer,
     RouteResponseSerializer,
     StopSerializer,
     StopSuggestionQuerySerializer,
 )
-from gtfs.services import RouteLeg, RouteOption, RouteSelectionService, WalkLeg
+from gtfs.services import (
+    HereAutosuggestConfigurationError,
+    HereAutosuggestError,
+    HereAutosuggestService,
+    RouteLeg,
+    RouteOption,
+    RouteSelectionService,
+    WalkLeg,
+)
+
+
+class GeocodeView(APIView):
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name='text',
+                type=str,
+                location=OpenApiParameter.QUERY,
+                description='Text to geocode. Must be longer than 3 characters.',
+                required=True,
+            ),
+        ],
+        responses={
+            200: GeocodeSuggestionSerializer(many=True),
+            502: ErrorResponseSerializer,
+            503: ErrorResponseSerializer,
+        },
+        description='Return HERE autosuggestions with names and coordinates.',
+    )
+    def get(self, request: Request) -> Response:
+        query_serializer = GeocodeQuerySerializer(data=request.query_params)
+        query_serializer.is_valid(raise_exception=True)
+        try:
+            suggestions = HereAutosuggestService().suggest(
+                query_serializer.validated_data['text'],
+            )
+        except HereAutosuggestConfigurationError as error:
+            return Response(
+                {'detail': str(error)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except HereAutosuggestError as error:
+            return Response(
+                {'detail': str(error)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(GeocodeSuggestionSerializer(suggestions, many=True).data)
 
 
 class RouteCreateView(APIView):
