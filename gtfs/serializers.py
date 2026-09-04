@@ -219,5 +219,19 @@ class ErrorResponseSerializer(serializers.Serializer):
     detail = serializers.CharField()
 
 
+class GeocodeQuerySerializer(serializers.Serializer):
+    text = serializers.CharField(min_length=4, trim_whitespace=True)
+
+
+class CoordinatesSerializer(serializers.Serializer):
+    lat = serializers.FloatField()
+    lng = serializers.FloatField()
+
+
+class GeocodeSuggestionSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    coordinates = CoordinatesSerializer()
+
+
 class StopSuggestionQuerySerializer(serializers.Serializer):
     name = serializers.CharField(min_length=3, trim_whitespace=True)
