@@ -56,17 +56,32 @@ Content-Type: application/json
 }
 ```
 
-Both stop IDs and `departure_time` are required. `service_date` is optional and
-defaults to the current date in the feed's agency timezone. It identifies the
-GTFS service day, so durations beyond 24 hours remain valid. `hops` is an
+Instead of stop IDs, the origin and destination may be supplied as raw
+coordinates. The closest imported GTFS stop is selected for each location:
+
+```json
+{
+  "from_lat": 52.4064,
+  "from_lon": 16.9252,
+  "to_lat": 52.4019,
+  "to_lon": 16.9107,
+  "departure_time": "08:30:00"
+}
+```
+
+Each endpoint must use either its stop ID or both coordinate fields, but not
+both forms. `departure_time` is always required. `service_date` is optional
+and defaults to the current date in the feed's agency timezone. It identifies
+the GTFS service day, so durations beyond 24 hours remain valid. `hops` is an
 optional maximum transfer count and falls back to `ROUTE_MAX_HOPS`. Exchange
 times are optional GTFS-style durations and fall back to the configured
-defaults. The response contains the resolved `service_date` and a `routes`
+defaults. The response contains the resolved `service_date`, the selected
+`from_stop` and `to_stop` (including their GTFS coordinates), and a `routes`
 array. Each route includes its departure, arrival, total duration, walking
 time, transfer count, and ordered stops. `legs` retains the transit-only view,
 while `segments` gives the complete ordered journey using `transit` and `walk`
-modes. Walking segments contain `distance_meters`; transit segments contain the
-trip, route, line, direction, and intermediate stops.
+modes. Walking segments contain `distance_meters`; transit segments contain
+the trip, route, line, direction, and intermediate stops.
 
 The selected stop ID represents its stop name during routing. RAPTOR considers
 every physical stop with that exact name for both the journey origin and
@@ -87,6 +102,8 @@ radius and must fall within the inclusive exchange-time range.
 ```json
 {
   "service_date": "2026-09-04",
+  "from_stop": {"stop_id": "STOP_A", "stop_lat": "52.406400000000", "stop_lon": "16.925200000000"},
+  "to_stop": {"stop_id": "STOP_C", "stop_lat": "52.401900000000", "stop_lon": "16.910700000000"},
   "routes": [
     {
       "hops": 1,
