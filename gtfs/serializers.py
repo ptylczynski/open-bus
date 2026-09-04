@@ -5,7 +5,10 @@ from rest_framework import serializers
 
 from gtfs.models import Stop
 from gtfs.services.routing_data import default_service_date
-from gtfs.services.stop_locator import NearestStopService
+
+
+ROUTE_FROM_COORDINATE_STOP_ID = '__route_from_coordinates__'
+ROUTE_TO_COORDINATE_STOP_ID = '__route_to_coordinates__'
 
 
 class RouteRequestSerializer(serializers.Serializer):
@@ -128,13 +131,23 @@ class RouteRequestSerializer(serializers.Serializer):
         if not has_longitude:
             return {longitude_key: 'This field is required with coordinates.'}
 
-        stop = NearestStopService.find_nearest(
-            attrs[latitude_key],
-            attrs[longitude_key],
+        latitude = attrs[latitude_key]
+        longitude = attrs[longitude_key]
+        stop_id = (
+            ROUTE_FROM_COORDINATE_STOP_ID
+            if prefix == 'from'
+            else ROUTE_TO_COORDINATE_STOP_ID
         )
-        if stop is None:
-            return {latitude_key: 'No stops are available.'}
-        attrs[stop_key] = stop
+        attrs[stop_key] = Stop(
+            stop_id=stop_id,
+            stop_name='Start' if prefix == 'from' else 'Finish',
+            stop_lat=latitude,
+            stop_lon=longitude,
+        )
+        attrs[f'{prefix}_coordinates'] = (
+            float(latitude),
+            float(longitude),
+        )
         return {}
 
 
