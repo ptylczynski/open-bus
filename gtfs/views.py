@@ -74,8 +74,8 @@ class RouteCreateView(APIView):
             404: ErrorResponseSerializer,
         },
         description=(
-            'Find route alternatives between two stops, or the stops nearest '
-            'to supplied coordinates, after the requested departure time.'
+            'Find route alternatives between stops or supplied coordinates '
+            'after the requested departure time.'
         ),
     )
     def post(self, request: Request) -> Response:
@@ -86,6 +86,11 @@ class RouteCreateView(APIView):
         route_service = RouteSelectionService(
             max_hops=request_serializer.validated_data.get('hops'),
         )
+        coordinate_arguments = {
+            key: request_serializer.validated_data[key]
+            for key in ('from_coordinates', 'to_coordinates')
+            if key in request_serializer.validated_data
+        }
         routes = route_service.find_routes(
             from_stop.stop_id,
             to_stop.stop_id,
@@ -97,6 +102,7 @@ class RouteCreateView(APIView):
                 request_serializer.validated_data['max_exchange_time']
             ),
             service_date=request_serializer.validated_data['service_date'],
+            **coordinate_arguments,
         )
         if not routes:
             return Response(
@@ -116,6 +122,8 @@ class RouteCreateView(APIView):
                 for stop_id in route.stop_ids
             },
         )
+        stops_by_id[from_stop.stop_id] = from_stop
+        stops_by_id[to_stop.stop_id] = to_stop
         requested_departure = request_serializer.validated_data['departure_time']
         response_routes = [
             route_response(route, stops_by_id, requested_departure)
