@@ -236,16 +236,11 @@ class RouteSelectionService:
             return []
         to_stop_id_set = set(to_stop_ids)
 
-        quick_bound = self._find_quick_bound(
+        quick_bounds = self._find_quick_bounds(
             snapshot,
             from_stop_ids,
             to_stop_id_set,
             departure_seconds,
-        )
-        self._latest_useful_arrival = (
-            None
-            if quick_bound is None
-            else self._useful_arrival_limit(quick_bound, departure_seconds)
         )
 
         initial_labels = [
@@ -281,6 +276,15 @@ class RouteSelectionService:
         ]
 
         for round_number in range(1, self.max_hops + 2):
+            quick_bound = quick_bounds.get(round_number)
+            self._latest_useful_arrival = (
+                None
+                if quick_bound is None
+                else self._useful_arrival_limit(
+                    quick_bound,
+                    departure_seconds,
+                )
+            )
             logger.info(
                 'Searching RAPTOR round %d: marked_stops=%d, labels=%d',
                 round_number,
@@ -429,13 +433,13 @@ class RouteSelectionService:
             ),
         )
 
-    def _find_quick_bound(
+    def _find_quick_bounds(
         self,
         snapshot: RoutingSnapshot,
         from_stop_ids: tuple[str, ...],
         to_stop_ids: set[str],
         departure: int,
-    ) -> int | None:
+    ) -> dict[int, int]:
         previous: dict[str, tuple[int, int | None]] = {
             stop_id: (departure, None) for stop_id in from_stop_ids
         }
@@ -450,7 +454,10 @@ class RouteSelectionService:
             for stop_id, (ready_time, _) in previous.items()
             if stop_id in to_stop_ids
         ]
-        best = min(destination_arrivals, default=None)
+        bounds = {}
+        initial_bound = min(destination_arrivals, default=None)
+        if initial_bound is not None:
+            bounds[0] = initial_bound
 
         for round_number in range(1, self.max_hops + 2):
             transit: dict[str, tuple[int, int]] = {}
@@ -507,14 +514,9 @@ class RouteSelectionService:
                 if stop_id in to_stop_ids
             ]
             if destination_arrivals:
-                destination = min(destination_arrivals)
-                best = (
-                    destination
-                    if best is None
-                    else min(best, destination)
-                )
+                bounds[round_number] = min(destination_arrivals)
             previous = next_round
-        return best
+        return bounds
 
     @staticmethod
     def _same_name_stop_ids(stop_id: str) -> tuple[str, ...]:
