@@ -37,7 +37,12 @@ from gtfs.services import (
 )
 from gtfs.services.routing_data import (
     clear_routing_snapshot_cache,
+    great_circle_distance,
     get_routing_snapshot,
+)
+from gtfs.serializers import (
+    ROUTE_FROM_COORDINATE_STOP_ID,
+    ROUTE_TO_COORDINATE_STOP_ID,
 )
 
 
@@ -903,19 +908,10 @@ class RouteCreateViewTests(TestCase):
         )
 
     @patch('gtfs.views.RouteSelectionService.find_routes', return_value=[])
-    def test_finds_nearest_stops_for_coordinates(
+    def test_passes_coordinate_pseudo_stops_to_router(
         self,
         find_routes: Mock,
     ) -> None:
-        Stop.objects.filter(stop_id='stop-0').update(
-            stop_lat=0,
-            stop_lon=0,
-        )
-        Stop.objects.filter(stop_id='stop-1').update(
-            stop_lat=10,
-            stop_lon=10,
-        )
-
         response = self.client.post(
             reverse('route-create'),
             {
@@ -930,12 +926,125 @@ class RouteCreateViewTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
         find_routes.assert_called_once_with(
-            'stop-0',
-            'stop-1',
+            ROUTE_FROM_COORDINATE_STOP_ID,
+            ROUTE_TO_COORDINATE_STOP_ID,
             departure_time=timedelta(hours=8),
             min_exchange_time=timedelta(0),
             max_exchange_time=timedelta(hours=1),
             service_date=date(2026, 9, 4),
+            from_coordinates=(0.001, 0.001),
+            to_coordinates=(10.001, 10.001),
+        )
+
+    @patch('gtfs.views.RouteSelectionService.find_routes')
+    def test_returns_coordinate_inputs_as_pseudo_stops(
+        self,
+        find_routes: Mock,
+    ) -> None:
+        find_routes.return_value = [
+            RouteOption(
+                stop_ids=(
+                    ROUTE_FROM_COORDINATE_STOP_ID,
+                    'stop-0',
+                    'stop-1',
+                    ROUTE_TO_COORDINATE_STOP_ID,
+                ),
+                hops=0,
+                departure_time=timedelta(hours=7, minutes=58),
+                arrival_time=timedelta(hours=8, minutes=22),
+                walking_time=timedelta(minutes=4),
+                legs=(
+                    RouteLeg(
+                        trip_id='trip',
+                        route_id='route',
+                        line_number='1',
+                        line_name='Line',
+                        direction='Centre',
+                        direction_id=0,
+                        from_stop_id='stop-0',
+                        to_stop_id='stop-1',
+                        stop_ids=('stop-0', 'stop-1'),
+                        departure_time=timedelta(hours=8),
+                        arrival_time=timedelta(hours=8, minutes=20),
+                    ),
+                ),
+                segments=(
+                    WalkLeg(
+                        from_stop_id=ROUTE_FROM_COORDINATE_STOP_ID,
+                        to_stop_id='stop-0',
+                        departure_time=timedelta(hours=7, minutes=58),
+                        arrival_time=timedelta(hours=8),
+                        distance_meters=168,
+                    ),
+                    RouteLeg(
+                        trip_id='trip',
+                        route_id='route',
+                        line_number='1',
+                        line_name='Line',
+                        direction='Centre',
+                        direction_id=0,
+                        from_stop_id='stop-0',
+                        to_stop_id='stop-1',
+                        stop_ids=('stop-0', 'stop-1'),
+                        departure_time=timedelta(hours=8),
+                        arrival_time=timedelta(hours=8, minutes=20),
+                    ),
+                    WalkLeg(
+                        from_stop_id='stop-1',
+                        to_stop_id=ROUTE_TO_COORDINATE_STOP_ID,
+                        departure_time=timedelta(hours=8, minutes=20),
+                        arrival_time=timedelta(hours=8, minutes=22),
+                        distance_meters=168,
+                    ),
+                ),
+            ),
+        ]
+
+        response = self.client.post(
+            reverse('route-create'),
+            {
+                'from_lat': '52.399',
+                'from_lon': '16.899',
+                'to_lat': '52.401',
+                'to_lon': '16.901',
+                'departure_time': '07:58:00',
+                'service_date': '2026-09-04',
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['from_stop']['stop_name'], 'Start')
+        self.assertEqual(
+            payload['from_stop']['stop_id'],
+            ROUTE_FROM_COORDINATE_STOP_ID,
+        )
+        self.assertEqual(payload['from_stop']['stop_lat'], '52.399000000000')
+        self.assertEqual(payload['to_stop']['stop_name'], 'Finish')
+        self.assertEqual(
+            payload['to_stop']['stop_id'],
+            ROUTE_TO_COORDINATE_STOP_ID,
+        )
+        self.assertEqual(payload['to_stop']['stop_lon'], '16.901000000000')
+        self.assertEqual(
+            payload['routes'][0]['stops'][0],
+            payload['from_stop'],
+        )
+        self.assertEqual(
+            payload['routes'][0]['stops'][-1],
+            payload['to_stop'],
+        )
+        self.assertEqual(
+            [segment['mode'] for segment in payload['routes'][0]['segments']],
+            ['walk', 'transit', 'walk'],
+        )
+        self.assertFalse(
+            Stop.objects.filter(
+                stop_id__in=(
+                    ROUTE_FROM_COORDINATE_STOP_ID,
+                    ROUTE_TO_COORDINATE_STOP_ID,
+                ),
+            ).exists(),
         )
 
     def test_requires_complete_coordinates(self) -> None:
@@ -1168,6 +1277,173 @@ class RouteSelectionServiceTests(TestCase):
 
         self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
 
+    @override_settings(
+        ROUTE_MAX_WALK_DISTANCE_METERS=500,
+        ROUTE_MAX_COORDINATE_STOPS=4,
+        ROUTE_WALK_SPEED_METERS_PER_SECOND=1.4,
+    )
+    def test_walks_from_and_to_exact_coordinate_endpoints(self) -> None:
+        Stop.objects.filter(stop_id='a').update(stop_lat=52.0, stop_lon=16.0)
+        Stop.objects.filter(stop_id='b').update(stop_lat=52.02, stop_lon=16.0)
+        Stop.objects.filter(stop_id__in=('c', 'd', 'e')).update(
+            stop_lat=53.0,
+            stop_lon=16.0,
+        )
+        self._create_trip(
+            'too-early',
+            ('a', 'b'),
+            timedelta(hours=7, minutes=56),
+        )
+        self._create_trip('direct', ('a', 'b'), timedelta(hours=8))
+        start = (51.999, 16.0)
+        finish = (52.021, 16.0)
+
+        routes = RouteSelectionService(max_hops=0).find_routes(
+            ROUTE_FROM_COORDINATE_STOP_ID,
+            ROUTE_TO_COORDINATE_STOP_ID,
+            departure_time=timedelta(hours=7, minutes=55),
+            service_date=date(2026, 9, 4),
+            from_coordinates=start,
+            to_coordinates=finish,
+        )
+
+        self.assertEqual(len(routes), 1)
+        route = routes[0]
+        self.assertEqual(
+            route.stop_ids,
+            (
+                ROUTE_FROM_COORDINATE_STOP_ID,
+                'a',
+                'b',
+                ROUTE_TO_COORDINATE_STOP_ID,
+            ),
+        )
+        self.assertEqual(
+            [type(segment) for segment in route.segments],
+            [WalkLeg, RouteLeg, WalkLeg],
+        )
+        first_walk = route.segments[0]
+        last_walk = route.segments[-1]
+        assert isinstance(first_walk, WalkLeg)
+        assert isinstance(last_walk, WalkLeg)
+        self.assertEqual(
+            first_walk.distance_meters,
+            round(great_circle_distance(start, (52.0, 16.0))),
+        )
+        self.assertEqual(
+            last_walk.distance_meters,
+            round(great_circle_distance((52.02, 16.0), finish)),
+        )
+        self.assertNotIn(
+            ROUTE_FROM_COORDINATE_STOP_ID,
+            {leg.from_stop_id for leg in route.legs},
+        )
+        self.assertNotIn(
+            ROUTE_TO_COORDINATE_STOP_ID,
+            {leg.from_stop_id for leg in route.legs},
+        )
+        self.assertEqual(route.legs[0].trip_id, 'direct')
+        self.assertEqual(
+            route.arrival_time,
+            route.legs[-1].arrival_time + last_walk.duration,
+        )
+        self.assertEqual(
+            route.walking_time,
+            first_walk.duration + last_walk.duration,
+        )
+
+    @override_settings(
+        ROUTE_MAX_COORDINATE_STOPS=2,
+        ROUTE_WALK_SPEED_METERS_PER_SECOND=1,
+    )
+    def test_limits_coordinate_connections_to_nearby_stops(self) -> None:
+        paths = RouteSelectionService()._endpoint_footpaths(
+            (0.0, 0.0),
+            {
+                'first': (0.001, 0.0),
+                'second': (0.002, 0.0),
+                'third': (0.003, 0.0),
+                'too-far': (0.01, 0.0),
+            },
+        )
+
+        self.assertEqual(
+            [path.to_stop_id for path in paths],
+            ['first', 'second'],
+        )
+        self.assertTrue(
+            all(path.duration <= 15 * 60 for path in paths),
+        )
+
+    @override_settings(
+        ROUTE_MAX_COORDINATE_STOPS=4,
+        ROUTE_WALK_SPEED_METERS_PER_SECOND=1.4,
+    )
+    def test_route_limit_prefers_diverse_coordinate_access_stops(self) -> None:
+        Stop.objects.filter(stop_id='a').update(stop_lat=52.0005, stop_lon=16)
+        Stop.objects.filter(stop_id='c').update(stop_lat=52.001, stop_lon=16)
+        Stop.objects.filter(stop_id='b').update(stop_lat=52.0195, stop_lon=16)
+        Stop.objects.filter(stop_id='d').update(stop_lat=52.0185, stop_lon=16)
+        Stop.objects.filter(stop_id='e').update(stop_lat=52.019, stop_lon=16)
+        self._create_trip('best', ('a', 'b'), timedelta(hours=8))
+        self._create_trip(
+            'same-start',
+            ('a', 'd'),
+            timedelta(hours=8, minutes=1),
+        )
+        self._create_trip(
+            'diverse',
+            ('c', 'e'),
+            timedelta(hours=8, minutes=2),
+        )
+
+        routes = RouteSelectionService(
+            max_hops=0,
+            max_alternatives_per_hop=5,
+            max_routes=2,
+        ).find_routes(
+            ROUTE_FROM_COORDINATE_STOP_ID,
+            ROUTE_TO_COORDINATE_STOP_ID,
+            departure_time=timedelta(hours=7, minutes=55),
+            service_date=date(2026, 9, 4),
+            from_coordinates=(52.0, 16.0),
+            to_coordinates=(52.02, 16.0),
+        )
+
+        self.assertEqual(
+            [
+                (route.legs[0].from_stop_id, route.legs[-1].to_stop_id)
+                for route in routes
+            ],
+            [('a', 'b'), ('c', 'e')],
+        )
+
+    @override_settings(
+        ROUTE_MAX_COORDINATE_STOPS=4,
+        ROUTE_WALK_SPEED_METERS_PER_SECOND=1,
+    )
+    def test_excludes_stops_over_fifteen_minutes_from_coordinates(self) -> None:
+        paths = RouteSelectionService()._endpoint_footpaths(
+            (0.0, 0.0),
+            {
+                'nearby': (0.008, 0.0),
+                'too-far': (0.009, 0.0),
+            },
+        )
+
+        self.assertEqual(
+            [path.to_stop_id for path in paths],
+            ['nearby'],
+        )
+
+    @override_settings(ROUTE_MAX_COORDINATE_STOPS=0)
+    def test_rejects_non_positive_coordinate_stop_limit(self) -> None:
+        with self.assertRaisesMessage(
+            ValueError,
+            'ROUTE_MAX_COORDINATE_STOPS must be at least one',
+        ):
+            RouteSelectionService()
+
     def test_logs_route_search_progress_and_result(self) -> None:
         self._create_trip(
             'direct',
@@ -1322,7 +1598,7 @@ class RouteSelectionServiceTests(TestCase):
         self.assertEqual(stop_ids, ['a', 'c', 'd', 'b'])
         self.assertEqual(service.max_workers, 2)
 
-    def test_prefers_earlier_arrival_over_fewer_transfers(self) -> None:
+    def test_prefers_fewer_transfers_over_earlier_arrival(self) -> None:
         self._create_trip('first', ('a', 'c'), timedelta(hours=8))
         self._create_trip(
             'second',
@@ -1337,7 +1613,42 @@ class RouteSelectionServiceTests(TestCase):
             departure_time=timedelta(hours=7, minutes=30),
         )
 
-        self.assertEqual(stop_ids, ['a', 'c', 'b'])
+        self.assertEqual(stop_ids, ['a', 'd', 'b'])
+
+    @override_settings(ROUTE_MAX_WALK_DISTANCE_METERS=500)
+    def test_prefers_no_walking_over_an_earlier_arrival(self) -> None:
+        Stop.objects.filter(stop_id='a').update(stop_lat=52.0, stop_lon=16.0)
+        Stop.objects.filter(stop_id='b').update(stop_lat=52.02, stop_lon=16.0)
+        Stop.objects.filter(stop_id='c').update(stop_lat=52.019, stop_lon=16.0)
+        Stop.objects.filter(stop_id__in=('d', 'e')).update(
+            stop_lat=53.0,
+            stop_lon=16.0,
+        )
+        self._create_trip(
+            'walk-earlier',
+            ('a', 'c'),
+            timedelta(hours=7, minutes=55),
+        )
+        self._create_trip(
+            'no-walk-later',
+            ('a', 'b'),
+            timedelta(hours=8),
+        )
+
+        routes = RouteSelectionService(
+            max_hops=0,
+            max_alternatives_per_hop=2,
+            max_routes=1,
+        ).find_routes(
+            'a',
+            'b',
+            departure_time=timedelta(hours=7, minutes=50),
+            service_date=date(2026, 9, 4),
+        )
+
+        self.assertEqual(len(routes), 1)
+        self.assertEqual(routes[0].legs[0].trip_id, 'no-walk-later')
+        self.assertEqual(routes[0].walking_time, timedelta(0))
 
     def test_returns_alternatives_for_every_hop_count(self) -> None:
         self._create_trip('direct', ('a', 'd', 'b'), timedelta(hours=9))
@@ -1354,10 +1665,10 @@ class RouteSelectionServiceTests(TestCase):
             departure_time=timedelta(hours=7, minutes=30),
         )
 
-        self.assertEqual([route.hops for route in routes], [1, 0])
+        self.assertEqual([route.hops for route in routes], [0, 1])
         self.assertEqual(
             [route.stop_ids for route in routes],
-            [('a', 'c', 'e', 'b'), ('a', 'd', 'b')],
+            [('a', 'd', 'b'), ('a', 'c', 'e', 'b')],
         )
 
     def test_selects_the_earliest_route_without_geographic_bias(
