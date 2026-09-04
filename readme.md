@@ -79,7 +79,7 @@ Content-Type: application/json
 ```
 
 Instead of stop IDs, the origin and destination may be supplied as raw
-coordinates. The closest imported GTFS stop is selected for each location:
+coordinates:
 
 ```json
 {
@@ -91,35 +91,45 @@ coordinates. The closest imported GTFS stop is selected for each location:
 }
 ```
 
-Each endpoint must use either its stop ID or both coordinate fields, but not
-both forms. `departure_time` is always required. `service_date` is optional
-and defaults to the current date in the feed's agency timezone. It identifies
-the GTFS service day, so durations beyond 24 hours remain valid. `hops` is an
-optional maximum transfer count and falls back to `ROUTE_MAX_HOPS`. Exchange
-times are optional GTFS-style durations and fall back to the configured
-defaults. The response contains the resolved `service_date`, the selected
-`from_stop` and `to_stop` (including their GTFS coordinates), and a `routes`
-array. Each route includes its departure, arrival, total duration, walking
-time, transfer count, and ordered stops. `legs` retains the transit-only view,
-while `segments` gives the complete ordered journey using `transit` and `walk`
-modes. Walking segments contain `distance_meters`; transit segments contain
-the trip, route, line, direction, and intermediate stops.
+Each coordinate endpoint becomes an unsaved `Start` or `Finish` pseudo stop.
+Pseudo stops have no transit departures and connect by walking to at most
+`ROUTE_MAX_COORDINATE_STOPS` nearest GTFS stops that are within a 15-minute
+walk. The first and last walking distances are measured from the exact
+requested coordinates. Each endpoint must use either its stop ID or both
+coordinate fields, but not both forms. `departure_time` is always required.
+`service_date` is optional and defaults to the current date in the feed's
+agency timezone. It identifies the GTFS service day, so durations beyond 24
+hours remain valid. `hops` is an optional maximum transfer count and falls
+back to `ROUTE_MAX_HOPS`. Exchange times are optional GTFS-style durations and
+fall back to the configured defaults. The response contains the resolved
+`service_date`, the selected `from_stop` and `to_stop` (including their
+coordinates), and a `routes` array. Each route includes its departure,
+arrival, total duration, walking time, transfer count, and ordered stops.
+`legs` retains the transit-only view, while `segments` gives the complete
+ordered journey using `transit` and `walk` modes. Walking segments contain
+`distance_meters`; transit segments contain the trip, route, line, direction,
+and intermediate stops.
 
-The selected stop ID represents its stop name during routing. RAPTOR considers
-every physical stop with that exact name for both the journey origin and
-destination, and returned routes contain the physical stop IDs actually used.
+For stop-ID endpoints, the selected stop ID represents its stop name during
+routing. RAPTOR considers every physical stop with that exact name for both
+the journey origin and destination, and returned routes contain the physical
+stop IDs actually used.
 
 The `transfers` array identifies the incoming and outgoing stops and lines,
 total alight-to-board wait, and the walking portion of that interval.
 The number of results for each transfer count is capped by
 `ROUTE_MAX_ALTERNATIVES_PER_HOP`, while `ROUTE_MAX_ROUTES` caps the total and
-stops the search once enough routes are found. A bounded multi-label RAPTOR
-search computes arrival/transfer/walking Pareto routes, retains alternatives
-within the configured absolute and relative detour limits, and uses a
-revisioned in-process timetable snapshot. Trips are filtered through
-`calendar.txt` and `calendar_dates.txt`; boarding and alighting restrictions
-are honored. Transfers may walk between physical stops within the configured
-radius and must fall within the inclusive exchange-time range.
+stops the search once enough routes are found. Route selection prioritizes
+fewer changes, then less walking, then earlier arrival. Within the same change
+and walking preference, it favors alternatives using different boarding and
+alighting stops so coordinate searches do not fill the response with routes
+through only one nearby stop pair. A bounded multi-label RAPTOR search computes
+arrival/transfer/walking Pareto routes, retains alternatives within the
+configured absolute and relative detour limits, and uses a revisioned
+in-process timetable snapshot. Trips are filtered through `calendar.txt` and
+`calendar_dates.txt`; boarding and alighting restrictions are honored.
+Transfers may walk between physical stops within the configured radius and
+must fall within the inclusive exchange-time range.
 
 ```json
 {
@@ -300,7 +310,8 @@ Application settings can be changed with environment variables:
 | `ROUTE_CALCULATION_WORKERS` | available CPU threads | Deprecated compatibility setting; RAPTOR scans are single-threaded |
 | `ROUTE_MIN_EXCHANGE_TIME_SECONDS` | `0` | Default minimum time allowed for a transfer |
 | `ROUTE_MAX_EXCHANGE_TIME_SECONDS` | `3600` | Default maximum time allowed for a transfer |
-| `ROUTE_MAX_WALK_DISTANCE_METERS` | `500` | Maximum direct walking link between stops |
+| `ROUTE_MAX_WALK_DISTANCE_METERS` | `500` | Maximum direct walking link between GTFS stops |
+| `ROUTE_MAX_COORDINATE_STOPS` | `4` | Maximum nearby GTFS stops connected to each coordinate endpoint |
 | `ROUTE_WALK_SPEED_METERS_PER_SECOND` | `1.4` | Walking speed used to time footpaths |
 | `ROUTE_MAX_EXTRA_TRAVEL_SECONDS` | `1800` | Maximum arrival delay for a same-hop alternative |
 | `ROUTE_MAX_EXTRA_TRAVEL_RATIO` | `1.5` | Maximum duration ratio for a same-hop alternative |
