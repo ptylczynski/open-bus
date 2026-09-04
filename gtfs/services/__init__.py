@@ -2,6 +2,11 @@ from gtfs.services.downloader import (
     GtfsDownloadBatchError,
     GtfsDownloadService,
 )
+from gtfs.services.geocoder import (
+    HereAutosuggestConfigurationError,
+    HereAutosuggestError,
+    HereAutosuggestService,
+)
 from gtfs.services.importer import GtfsImportService
 from gtfs.services.router import (
     RouteLeg,
@@ -16,6 +21,9 @@ __all__ = (
     'GtfsDownloadBatchError',
     'GtfsDownloadService',
     'GtfsImportService',
+    'HereAutosuggestConfigurationError',
+    'HereAutosuggestError',
+    'HereAutosuggestService',
     'NearestStopService',
     'RouteLeg',
     'RouteOption',
