@@ -39,6 +39,28 @@ The `name` query parameter must contain at least three characters. Matching is
 case-insensitive and ignores diacritics, so `swi` also matches `Święty`.
 Suggestions also contain only one representative stop for each exact name.
 
+Geocode free text with HERE autosuggest using:
+
+```text
+GET /api/geocode/?text=Poznań Główny
+```
+
+`text` must contain more than three characters after surrounding whitespace
+is removed. The response contains at most `HERE_AUTOSUGGEST_LIMIT` suggestions;
+items without geographic positions are omitted:
+
+```json
+[
+  {
+    "name": "Poznań Główny",
+    "coordinates": {"lat": 52.40188, "lng": 16.91094}
+  }
+]
+```
+
+Set `HERE_API_KEY` before using this endpoint. The key is sent directly from
+the backend to HERE and is not exposed in the endpoint response.
+
 Request a route between two stops with:
 
 ```text
@@ -266,6 +288,10 @@ Application settings can be changed with environment variables:
 | `GTFS_DOWNLOAD_INTERVAL_SECONDS` | `3600` | Delay between continuous download batches |
 | `GTFS_DOWNLOAD_TIMEOUT_SECONDS` | `60` | HTTP request timeout |
 | `GTFS_LOG_LEVEL` | `INFO` | Console logging level for GTFS services, including route search progress |
+| `HERE_API_KEY` | empty | HERE API key used to authorize autosuggest requests |
+| `HERE_AUTOSUGGEST_LIMIT` | `5` | Maximum number of geocoding suggestions returned |
+| `HERE_AUTOSUGGEST_BOUNDING_BOX` | `bbox:16.7,52.2,17.2,52.6` | HERE search area around Poznań in `bbox:west,south,east,north` format |
+| `HERE_AUTOSUGGEST_TIMEOUT_SECONDS` | `10` | HERE autosuggest request timeout |
 | `CORS_ALLOW_ALL_ORIGINS` | `true` | Allow every origin to access `/api/` |
 | `CORS_ALLOWED_ORIGINS` | empty | Comma-separated allowed origins when allow-all is disabled |
 | `ROUTE_MAX_HOPS` | `1` | Maximum number of transfers considered during route selection |
