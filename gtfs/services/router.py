@@ -1,8 +1,9 @@
 import logging
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from math import ceil
 from time import perf_counter
 
 from django.conf import settings
@@ -13,11 +14,13 @@ from gtfs.services.routing_data import (
     RoutingPattern,
     RoutingSnapshot,
     default_service_date,
+    great_circle_distance,
     get_routing_snapshot,
 )
 
 
 logger = logging.getLogger(__name__)
+COORDINATE_ENDPOINT_MAX_WALK_SECONDS = 15 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +52,7 @@ class WalkLeg:
 
 
 RouteSegment = RouteLeg | WalkLeg
+Coordinates = tuple[float, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +115,7 @@ class RouteSelectionService:
             settings.ROUTE_MAX_ROUTES if max_routes is None else max_routes
         )
         self.max_labels_per_stop = settings.ROUTE_MAX_LABELS_PER_STOP
+        self.max_coordinate_stops = settings.ROUTE_MAX_COORDINATE_STOPS
         self.service_date: date | None = None
         self._min_exchange_seconds = 0
         self._max_exchange_seconds = 0
@@ -128,6 +133,10 @@ class RouteSelectionService:
             raise ValueError('ROUTE_MAX_ROUTES must be at least one')
         if self.max_labels_per_stop < 1:
             raise ValueError('ROUTE_MAX_LABELS_PER_STOP must be at least one')
+        if self.max_coordinate_stops < 1:
+            raise ValueError(
+                'ROUTE_MAX_COORDINATE_STOPS must be at least one'
+            )
 
     def find_route(
         self,
@@ -137,6 +146,8 @@ class RouteSelectionService:
         min_exchange_time: timedelta | None = None,
         max_exchange_time: timedelta | None = None,
         service_date: date | None = None,
+        from_coordinates: Coordinates | None = None,
+        to_coordinates: Coordinates | None = None,
     ) -> list[str] | None:
         routes = self.find_routes(
             from_stop_id,
@@ -145,6 +156,8 @@ class RouteSelectionService:
             min_exchange_time,
             max_exchange_time,
             service_date,
+            from_coordinates=from_coordinates,
+            to_coordinates=to_coordinates,
         )
         if not routes:
             return None
@@ -158,6 +171,8 @@ class RouteSelectionService:
         min_exchange_time: timedelta | None = None,
         max_exchange_time: timedelta | None = None,
         service_date: date | None = None,
+        from_coordinates: Coordinates | None = None,
+        to_coordinates: Coordinates | None = None,
     ) -> list[RouteOption]:
         started_at = perf_counter()
         departure_seconds = int(departure_time.total_seconds())
@@ -178,8 +193,16 @@ class RouteSelectionService:
             self.max_alternatives_per_hop,
             self.max_routes,
         )
-        from_stop_ids = self._same_name_stop_ids(from_stop_id)
-        to_stop_ids = self._same_name_stop_ids(to_stop_id)
+        from_stop_ids = (
+            (from_stop_id,)
+            if from_coordinates is not None
+            else self._same_name_stop_ids(from_stop_id)
+        )
+        to_stop_ids = (
+            (to_stop_id,)
+            if to_coordinates is not None
+            else self._same_name_stop_ids(to_stop_id)
+        )
         common_stop_ids = set(from_stop_ids) & set(to_stop_ids)
         if common_stop_ids:
             reached_stop_id = (
@@ -196,7 +219,13 @@ class RouteSelectionService:
                 )
             ]
 
-        snapshot = get_routing_snapshot(self.service_date)
+        snapshot = self._with_coordinate_endpoints(
+            get_routing_snapshot(self.service_date),
+            from_stop_id,
+            from_coordinates,
+            to_stop_id,
+            to_coordinates,
+        )
         from_stop_ids = tuple(
             stop_id for stop_id in from_stop_ids if stop_id in snapshot.stop_ids
         )
@@ -302,6 +331,103 @@ class RouteSelectionService:
             perf_counter() - started_at,
         )
         return routes
+
+    def _with_coordinate_endpoints(
+        self,
+        snapshot: RoutingSnapshot,
+        from_stop_id: str,
+        from_coordinates: Coordinates | None,
+        to_stop_id: str,
+        to_coordinates: Coordinates | None,
+    ) -> RoutingSnapshot:
+        if from_coordinates is None and to_coordinates is None:
+            return snapshot
+
+        stop_coordinates = {
+            stop_id: (float(latitude), float(longitude))
+            for stop_id, latitude, longitude in Stop.objects.filter(
+                stop_id__in=snapshot.stop_ids,
+            ).values_list('stop_id', 'stop_lat', 'stop_lon')
+        }
+        footpaths = {
+            stop_id: list(paths)
+            for stop_id, paths in snapshot.footpaths.items()
+        }
+        stop_ids = set(snapshot.stop_ids)
+
+        if from_coordinates is not None:
+            stop_ids.add(from_stop_id)
+            footpaths[from_stop_id] = self._endpoint_footpaths(
+                from_coordinates,
+                stop_coordinates,
+            )
+        if to_coordinates is not None:
+            stop_ids.add(to_stop_id)
+            for path in self._endpoint_footpaths(
+                to_coordinates,
+                stop_coordinates,
+            ):
+                footpaths.setdefault(path.to_stop_id, []).append(
+                    Footpath(
+                        to_stop_id=to_stop_id,
+                        distance_meters=path.distance_meters,
+                        duration=path.duration,
+                    )
+                )
+        if from_coordinates is not None and to_coordinates is not None:
+            direct_distance = great_circle_distance(
+                from_coordinates,
+                to_coordinates,
+            )
+            direct_path = self._footpath(to_stop_id, direct_distance)
+            if direct_path.duration <= COORDINATE_ENDPOINT_MAX_WALK_SECONDS:
+                footpaths[from_stop_id].append(
+                    direct_path,
+                )
+
+        return replace(
+            snapshot,
+            footpaths={
+                stop_id: tuple(
+                    sorted(
+                        paths,
+                        key=lambda path: (path.duration, path.to_stop_id),
+                    ),
+                )
+                for stop_id, paths in footpaths.items()
+            },
+            stop_ids=frozenset(stop_ids),
+        )
+
+    def _endpoint_footpaths(
+        self,
+        endpoint: Coordinates,
+        stop_coordinates: dict[str, Coordinates],
+    ) -> list[Footpath]:
+        paths = []
+        for stop_id, coordinates in stop_coordinates.items():
+            distance = great_circle_distance(endpoint, coordinates)
+            path = self._footpath(stop_id, distance)
+            if path.duration <= COORDINATE_ENDPOINT_MAX_WALK_SECONDS:
+                paths.append((distance, path))
+        return [
+            path
+            for _, path in sorted(
+                paths,
+                key=lambda item: (item[0], item[1].to_stop_id),
+            )[:self.max_coordinate_stops]
+        ]
+
+    @staticmethod
+    def _footpath(stop_id: str, distance: float) -> Footpath:
+        return Footpath(
+            to_stop_id=stop_id,
+            distance_meters=int(round(distance)),
+            duration=max(
+                1,
+                ceil(distance / settings.ROUTE_WALK_SPEED_METERS_PER_SECOND),
+            ),
+        )
 
     def _find_quick_bound(
         self,
@@ -741,19 +867,40 @@ class RouteSelectionService:
         useful.sort(
             key=lambda label: (
                 self._signature(label) not in pareto_signatures,
-                label.time,
                 max(0, label.boardings - 1),
                 label.walking_seconds,
+                label.time,
                 self._signature(label),
             )
         )
 
         routes = []
         per_hop: dict[int, int] = defaultdict(int)
-        for label in useful:
+        used_from_stops = set()
+        used_to_stops = set()
+        used_endpoint_pairs = set()
+        remaining = list(useful)
+        while remaining:
+            eligible = [
+                (index, label)
+                for index, label in enumerate(remaining)
+                if per_hop[max(0, label.boardings - 1)]
+                < self.max_alternatives_per_hop
+            ]
+            if not eligible:
+                break
+            selected_index, label = min(
+                eligible,
+                key=lambda item: self._diversity_preference(
+                    item[1],
+                    used_from_stops,
+                    used_to_stops,
+                    used_endpoint_pairs,
+                    item[0],
+                ),
+            )
+            remaining.pop(selected_index)
             hops = max(0, label.boardings - 1)
-            if per_hop[hops] >= self.max_alternatives_per_hop:
-                continue
             departure = (
                 label.segments[0].departure_time
                 if label.segments
@@ -770,10 +917,51 @@ class RouteSelectionService:
                     segments=label.segments,
                 )
             )
+            from_stop_id, to_stop_id = self._route_endpoint_pair(label)
+            used_from_stops.add(from_stop_id)
+            used_to_stops.add(to_stop_id)
+            used_endpoint_pairs.add((from_stop_id, to_stop_id))
             per_hop[hops] += 1
             if len(routes) == self.max_routes:
                 break
         return routes
+
+    @staticmethod
+    def _diversity_preference(
+        label: _Label,
+        used_from_stops: set[str],
+        used_to_stops: set[str],
+        used_endpoint_pairs: set[tuple[str, str]],
+        quality_index: int,
+    ) -> tuple[int, int, int, bool, int]:
+        from_stop_id, to_stop_id = RouteSelectionService._route_endpoint_pair(
+            label,
+        )
+        new_endpoint_count = (
+            int(from_stop_id not in used_from_stops)
+            + int(to_stop_id not in used_to_stops)
+        )
+        return (
+            max(0, label.boardings - 1),
+            label.walking_seconds,
+            -new_endpoint_count,
+            (from_stop_id, to_stop_id) in used_endpoint_pairs,
+            quality_index,
+        )
+
+    @staticmethod
+    def _route_endpoint_pair(label: _Label) -> tuple[str, str]:
+        if label.legs:
+            return (
+                label.legs[0].from_stop_id,
+                label.legs[-1].to_stop_id,
+            )
+        if label.segments:
+            return (
+                label.segments[0].from_stop_id,
+                label.segments[-1].to_stop_id,
+            )
+        return label.stop_ids[0], label.stop_ids[-1]
 
     @staticmethod
     def _collapse_terminal_walk_alternatives(
