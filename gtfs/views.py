@@ -26,8 +26,8 @@ class RouteCreateView(APIView):
             404: ErrorResponseSerializer,
         },
         description=(
-            'Find route alternatives between two stops after the requested '
-            'departure time.'
+            'Find route alternatives between two stops, or the stops nearest '
+            'to supplied coordinates, after the requested departure time.'
         ),
     )
     def post(self, request: Request) -> Response:
@@ -77,6 +77,8 @@ class RouteCreateView(APIView):
         response_serializer = RouteResponseSerializer(
             {
                 'service_date': request_serializer.validated_data['service_date'],
+                'from_stop': from_stop,
+                'to_stop': to_stop,
                 'routes': response_routes,
             },
         )
