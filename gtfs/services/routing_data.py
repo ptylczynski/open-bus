@@ -388,7 +388,7 @@ def _build_footpaths(
                 for other_id in grid.get((cell_x + x_delta, cell_y + y_delta), ()):
                     if other_id <= stop_id:
                         continue
-                    distance = _great_circle_distance(
+                    distance = great_circle_distance(
                         coordinates[stop_id],
                         coordinates[other_id],
                     )
@@ -408,7 +408,7 @@ def _build_footpaths(
     }
 
 
-def _great_circle_distance(
+def great_circle_distance(
     origin: tuple[float, float],
     destination: tuple[float, float],
 ) -> float:
