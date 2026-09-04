@@ -1,4 +1,6 @@
 import io
+import json
+import urllib.error
 import zipfile
 from contextlib import ExitStack, nullcontext
 from datetime import date, timedelta
@@ -6,6 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Self
 from unittest.mock import Mock, call, patch
+from urllib.parse import parse_qs, urlparse
 
 from django.urls import reverse
 from django.test import SimpleTestCase, TestCase, override_settings
@@ -642,6 +645,102 @@ class StopSuggestionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn('name', response.json())
+
+
+@override_settings(
+    HERE_API_KEY='here-secret',
+    HERE_AUTOSUGGEST_LIMIT=2,
+    HERE_AUTOSUGGEST_BOUNDING_BOX='bbox:16.7,52.2,17.2,52.6',
+    HERE_AUTOSUGGEST_TIMEOUT_SECONDS=7,
+)
+class GeocodeViewTests(SimpleTestCase):
+    @patch('gtfs.services.geocoder.urllib.request.urlopen')
+    def test_returns_names_and_coordinates_from_here(
+        self,
+        urlopen: Mock,
+    ) -> None:
+        urlopen.return_value = Response(
+            json.dumps(
+                {
+                    'items': [
+                        {
+                            'title': 'Poznań',
+                            'position': {'lat': 52.408, 'lng': 16.934},
+                        },
+                        {
+                            'title': 'Poznań restaurants',
+                            'resultType': 'categoryQuery',
+                        },
+                        {
+                            'title': 'Poznań Główny',
+                            'position': {'lat': 52.402, 'lng': 16.911},
+                        },
+                    ],
+                },
+            ).encode(),
+        )
+
+        response = self.client.get(reverse('geocode'), {'text': 'Poznań'})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            [
+                {
+                    'name': 'Poznań',
+                    'coordinates': {'lat': 52.408, 'lng': 16.934},
+                },
+                {
+                    'name': 'Poznań Główny',
+                    'coordinates': {'lat': 52.402, 'lng': 16.911},
+                },
+            ],
+        )
+        request = urlopen.call_args.args[0]
+        query = parse_qs(urlparse(request.full_url).query)
+        self.assertEqual(query['apiKey'], ['here-secret'])
+        self.assertEqual(query['q'], ['Poznań'])
+        self.assertEqual(query['limit'], ['2'])
+        self.assertEqual(query['termsLimit'], ['0'])
+        self.assertEqual(query['in'], ['bbox:16.7,52.2,17.2,52.6'])
+        self.assertEqual(urlopen.call_args.kwargs['timeout'], 7)
+
+    @patch('gtfs.services.geocoder.urllib.request.urlopen')
+    def test_requires_text_longer_than_three_characters(
+        self,
+        urlopen: Mock,
+    ) -> None:
+        response = self.client.get(reverse('geocode'), {'text': 'abc'})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('text', response.json())
+        urlopen.assert_not_called()
+
+    @override_settings(HERE_API_KEY='')
+    @patch('gtfs.services.geocoder.urllib.request.urlopen')
+    def test_reports_missing_here_api_key(self, urlopen: Mock) -> None:
+        response = self.client.get(reverse('geocode'), {'text': 'Poznań'})
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {'detail': 'HERE API key is not configured.'},
+        )
+        urlopen.assert_not_called()
+
+    @patch(
+        'gtfs.services.geocoder.urllib.request.urlopen',
+        side_effect=urllib.error.URLError('unavailable'),
+    )
+    def test_reports_here_api_failure(self, urlopen: Mock) -> None:
+        response = self.client.get(reverse('geocode'), {'text': 'Poznań'})
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.json(),
+            {'detail': 'HERE autosuggest request failed.'},
+        )
+        urlopen.assert_called_once()
 
 
 class RouteCreateViewTests(TestCase):
